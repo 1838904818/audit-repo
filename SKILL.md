@@ -24,7 +24,9 @@ Run the bundled collector from the skill directory:
 python scripts/collect_repo_signals.py /path/to/repo --format markdown
 ```
 
-Use `--format json` when structured output will make further analysis easier. The collector ignores common dependency/build directories, does not follow symlinks, and checks only filenames, not contents, for sensitive-looking files.
+Use `--format json` when structured output will make further analysis easier. The collector also surfaces Git state, declared project scripts, configured tools, dependency-update files, ownership, containers, and CI action references. It ignores common dependency/build directories, does not follow symlinks, and checks only filenames, not contents, for sensitive-looking files.
+
+Use repeatable `--exclude-dir NAME` options for repository-specific generated folders. Adjust large-file review with `--large-file-mib MIB`; do not lower it so far that ordinary source files create noise.
 
 If Python is unavailable, gather equivalent signals with available read-only tools. Do not install a runtime just for the inventory.
 
@@ -33,11 +35,12 @@ If Python is unavailable, gather equivalent signals with available read-only too
 - Read the root documentation, manifests, CI definitions, and the smallest relevant configuration files.
 - Identify the repository's purpose, maturity, deployability, and likely consumers.
 - Infer intended commands from checked-in configuration rather than guessing.
+- Treat collector output as inventory, not findings. In particular, verify sensitive-looking filenames and work markers in context.
 - Do not penalize a small prototype for enterprise controls unless the user asks for that standard.
 
 ### 4. Run native checks
 
-Choose the narrowest relevant checks already supported by the repository, such as tests, linters, type checks, builds, or dependency validation.
+Choose the narrowest relevant checks already supported by the repository, such as tests, linters, type checks, builds, or dependency validation. Read [references/check-selection.md](references/check-selection.md) when the command choice is unclear or the repository spans multiple ecosystems.
 
 - Prefer documented commands and scripts declared in manifests.
 - Do not install dependencies, start persistent services, contact production systems, or apply automatic fixes.

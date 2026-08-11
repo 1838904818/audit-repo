@@ -21,25 +21,55 @@ class CollectRepoSignalsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             (root / "README.md").write_text("Example", encoding="utf-8")
-            (root / "pyproject.toml").write_text("[project]\nname='example'", encoding="utf-8")
+            (root / "pyproject.toml").write_text(
+                "[project]\nname='example'\n[tool.pytest.ini_options]\naddopts='-q'",
+                encoding="utf-8",
+            )
+            (root / "package.json").write_text(
+                '{"scripts":{"test":"pytest","lint":"ruff check ."}}',
+                encoding="utf-8",
+            )
             (root / ".env").write_text("SECRET=do-not-print", encoding="utf-8")
+            (root / ".env.production").write_text("SECRET=also-private", encoding="utf-8")
+            (root / ".env.example").write_text("SECRET=placeholder", encoding="utf-8")
+            (root / "Dockerfile").write_text("FROM scratch", encoding="utf-8")
+            (root / "Makefile").write_text("test:\n\tpython -m unittest\n", encoding="utf-8")
             (root / "src").mkdir()
             (root / "src" / "app.py").write_text("# TODO: test\nprint('ok')", encoding="utf-8")
             (root / "tests").mkdir()
-            (root / "tests" / "test_app.py").write_text("def test_ok(): pass", encoding="utf-8")
+            (root / "tests" / "test_app.py").write_text("# FIXME: fixture\ndef test_ok(): pass", encoding="utf-8")
             (root / ".github" / "workflows").mkdir(parents=True)
-            (root / ".github" / "workflows" / "ci.yml").write_text("name: CI", encoding="utf-8")
+            (root / ".github" / "workflows" / "ci.yml").write_text(
+                "name: CI\nsteps:\n  - uses: actions/checkout@v7",
+                encoding="utf-8",
+            )
+            (root / ".github" / "dependabot.yml").write_text("version: 2", encoding="utf-8")
+            (root / ".github" / "CODEOWNERS").write_text("* @example", encoding="utf-8")
 
             data = MODULE.collect(root, 100)
             rendered = MODULE.to_markdown(data)
 
+            self.assertFalse(data["git_repository"])
             self.assertEqual(data["test_file_count"], 1)
-            self.assertEqual(data["manifests"], ["pyproject.toml"])
+            self.assertEqual(data["manifests"], ["package.json", "pyproject.toml"])
             self.assertEqual(data["documentation"], ["README.md"])
             self.assertEqual(data["ci_files"], [".github/workflows/ci.yml"])
             self.assertEqual(data["work_markers"]["TODO"], 1)
-            self.assertEqual(data["sensitive_looking_files"][0]["path"], ".env")
+            self.assertNotIn("FIXME", data["work_markers"])
+            self.assertEqual(
+                [item["path"] for item in data["sensitive_looking_files"]],
+                [".env", ".env.production"],
+            )
+            self.assertEqual(data["environment_examples"], [".env.example"])
+            self.assertEqual(data["automation"]["package_scripts"]["package.json"], ["lint", "test"])
+            self.assertEqual(data["automation"]["make_targets"]["Makefile"], ["test"])
+            self.assertIn("pytest", data["automation"]["configured_tools"])
+            self.assertEqual(data["ci_action_references"], ["actions/checkout@v7"])
+            self.assertEqual(data["dependency_update_config"], [".github/dependabot.yml"])
+            self.assertEqual(data["codeowners"], [".github/CODEOWNERS"])
+            self.assertEqual(data["container_files"], ["Dockerfile"])
             self.assertNotIn("do-not-print", rendered)
+            self.assertNotIn("also-private", rendered)
 
     def test_scan_limit_is_reported(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -51,6 +81,20 @@ class CollectRepoSignalsTests(unittest.TestCase):
 
             self.assertEqual(data["file_count"], 2)
             self.assertTrue(data["scan_truncated"])
+
+    def test_custom_directory_exclusion_and_large_file_threshold(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "keep.py").write_text("print('ok')", encoding="utf-8")
+            (root / "generated").mkdir()
+            (root / "generated" / "ignored.py").write_text("# TODO: generated", encoding="utf-8")
+
+            data = MODULE.collect(root, 100, exclude_dirs=["generated"], large_file_bytes=1)
+
+            self.assertEqual(data["file_count"], 1)
+            self.assertEqual(data["excluded_directory_names"], ["generated"])
+            self.assertEqual(data["large_files"][0]["path"], "keep.py")
+            self.assertEqual(data["work_markers"], {})
 
 
 if __name__ == "__main__":
