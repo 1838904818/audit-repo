@@ -1,0 +1,4 @@
+interface:
+  display_name: "Audit Repo"
+  short_description: "Turn repository signals into a prioritized health report"
+  default_prompt: "Use $audit-repo to audit this repository and prioritize the most important fixes."
