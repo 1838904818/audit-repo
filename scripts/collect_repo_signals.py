@@ -69,6 +69,7 @@ TOOL_CONFIG_NAMES = {
     "vitest.config.ts": "vitest",
 }
 LARGE_FILE_BYTES = 5 * 1024 * 1024
+SCHEMA_VERSION = 1
 WORK_MARKER_RE = re.compile(r"(?im)(?:#|//|/\*+|<!--|;|--)\s*(TODO|FIXME|HACK|XXX)\b")
 CI_ACTION_RE = re.compile(r"(?m)^\s*-?\s*uses:\s*['\"]?([^'\"#\s]+)")
 MAKE_TARGET_RE = re.compile(r"(?m)^([A-Za-z0-9_.-]+)\s*:(?!=)")
@@ -290,6 +291,7 @@ def collect(
     git = git_metadata(root, tracked)
 
     return {
+        "schema_version": SCHEMA_VERSION,
         "root": str(root),
         "file_count": len(files),
         "scan_truncated": truncated,

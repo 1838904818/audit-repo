@@ -1,6 +1,6 @@
 ---
 name: audit-repo
-description: Audit a software repository and turn reproducible signals into a prioritized, evidence-backed health report. Use when Codex is asked to assess repository health, readiness, maintainability, test and CI coverage, dependency hygiene, documentation, security posture, technical debt, release risk, or the most important improvements to make before shipping or handing off a codebase.
+description: Audit a software repository and turn reproducible signals into a prioritized, evidence-backed health report or compare audit snapshots over time. Use when Codex is asked to assess repository health, readiness, maintainability, test and CI coverage, dependency hygiene, documentation, security posture, technical debt, release risk, regression in repository hygiene, or the most important improvements to make before shipping or handing off a codebase.
 ---
 
 # Audit Repo
@@ -29,6 +29,16 @@ Use `--format json` when structured output will make further analysis easier. Th
 Use repeatable `--exclude-dir NAME` options for repository-specific generated folders. Adjust large-file review with `--large-file-mib MIB`; do not lower it so far that ordinary source files create noise.
 
 If Python is unavailable, gather equivalent signals with available read-only tools. Do not install a runtime just for the inventory.
+
+For a repeat audit, save JSON snapshots outside the target repository when possible:
+
+```bash
+python scripts/collect_repo_signals.py /path/to/repo --format json --output before.json
+python scripts/collect_repo_signals.py /path/to/repo --format json --output after.json
+python scripts/compare_repo_signals.py before.json after.json --format markdown
+```
+
+Use `--fail-on-attention` only in automation where exit code `1` should flag high-confidence attention items. Exit code `2` means invalid input or an execution error. Compare snapshots made with the same exclusions, file limit, and large-file threshold; treat reported changes as leads to verify, not findings.
 
 ### 3. Understand the project before judging it
 
