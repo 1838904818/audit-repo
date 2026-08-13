@@ -55,6 +55,7 @@ class RepositoryContractTests(unittest.TestCase):
             "CHANGELOG.md",
             "LICENSE",
             ".gitattributes",
+            "CODE_OF_CONDUCT.md",
             "CONTRIBUTING.md",
             "SECURITY.md",
             "agents/openai.yaml",

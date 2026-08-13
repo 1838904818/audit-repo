@@ -36,6 +36,6 @@ jobs:
       - name: Exercise Markdown output
         run: python scripts/collect_repo_signals.py . --format markdown
       - name: Exercise JSON output
-        run: python scripts/collect_repo_signals.py . --format json --output repo-signals.json
+        run: python scripts/collect_repo_signals.py . --scan-mode tracked --scope-id ci-repository --format json --output "${{ runner.temp }}/repo-signals.json"
       - name: Exercise snapshot comparison
-        run: python scripts/compare_repo_signals.py repo-signals.json repo-signals.json --format markdown
+        run: python scripts/compare_repo_signals.py "${{ runner.temp }}/repo-signals.json" "${{ runner.temp }}/repo-signals.json" --format markdown --fail-on-attention --require-comparable

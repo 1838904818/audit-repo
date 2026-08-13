@@ -12,7 +12,14 @@ from typing import Any, Iterable
 
 
 SUPPORTED_SCHEMA_VERSIONS = {1}
+SCAN_MODES = {"filesystem", "git-visible", "tracked"}
+REQUIRED_SNAPSHOT_FIELDS = {
+    "root", "file_count", "scan_truncated", "excluded_directory_names",
+    "work_markers", "large_file_threshold_bytes", "large_files",
+    "sensitive_looking_files",
+}
 LARGE_GROWTH_MIN_BYTES = 5 * 1024 * 1024
+MAX_COUNT = 2**63 - 1
 SET_FIELDS = {
     "manifests": "Manifests",
     "lockfiles": "Lockfiles",
@@ -41,17 +48,26 @@ def validate_snapshot(raw: dict[str, Any], path: Path) -> None:
         raise SnapshotError(f"unsupported schema_version {version!r} in {path}")
 
     list_fields = set(SET_FIELDS) | {
-        "excluded_directory_names", "large_files", "sensitive_looking_files",
+        "excluded_directory_names", "exclude_path_patterns", "include_path_patterns",
+        "large_files", "scan_incomplete_reasons", "sensitive_looking_files",
     }
     for field in list_fields:
         if field in raw and not isinstance(raw[field], list):
             raise SnapshotError(f"field {field!r} must be a list in {path}")
-    for field in set(SET_FIELDS) | {"excluded_directory_names"}:
+    for field in set(SET_FIELDS) | {
+        "excluded_directory_names", "exclude_path_patterns", "include_path_patterns",
+        "scan_incomplete_reasons",
+    }:
         if any(not isinstance(item, str) for item in raw.get(field, [])):
             raise SnapshotError(f"field {field!r} must contain only strings in {path}")
     for field in ("file_count", "test_file_count", "large_file_threshold_bytes"):
         value = raw.get(field)
-        if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 0):
+        if value is not None and (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < 0
+            or (field in {"file_count", "test_file_count"} and value > MAX_COUNT)
+        ):
             raise SnapshotError(f"field {field!r} must be a non-negative integer in {path}")
     if "scan_file_limit" in raw:
         scan_file_limit = raw["scan_file_limit"]
@@ -63,6 +79,22 @@ def validate_snapshot(raw: dict[str, Any], path: Path) -> None:
         raise SnapshotError(f"field 'large_files_complete' must be a boolean in {path}")
     if "root" in raw and raw["root"] is not None and not isinstance(raw["root"], str):
         raise SnapshotError(f"field 'root' must be a string or null in {path}")
+    if "scan_mode" in raw and (
+        not isinstance(raw["scan_mode"], str) or raw["scan_mode"] not in SCAN_MODES
+    ):
+        raise SnapshotError(f"field 'scan_mode' must be one of {sorted(SCAN_MODES)} in {path}")
+    if "scope_id" in raw and raw["scope_id"] is not None:
+        scope_id = raw["scope_id"]
+        if (
+            not isinstance(scope_id, str)
+            or not scope_id.strip()
+            or len(scope_id) > 200
+            or any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in scope_id)
+        ):
+            raise SnapshotError(
+                f"field 'scope_id' must be null or 1-200 characters with non-whitespace content "
+                f"and no control characters in {path}"
+            )
 
     markers = raw.get("work_markers", {})
     if not isinstance(markers, dict) or any(
@@ -70,6 +102,7 @@ def validate_snapshot(raw: dict[str, Any], path: Path) -> None:
         or not isinstance(value, int)
         or isinstance(value, bool)
         or value < 0
+        or value > MAX_COUNT
         for key, value in markers.items()
     ):
         raise SnapshotError(f"field 'work_markers' must map strings to non-negative integers in {path}")
@@ -101,6 +134,10 @@ def validate_snapshot(raw: dict[str, Any], path: Path) -> None:
         ):
             raise SnapshotError(f"each 'sensitive_looking_files' item needs a string path and boolean/null tracked value in {path}")
 
+    missing_fields = sorted(REQUIRED_SNAPSHOT_FIELDS - raw.keys())
+    if missing_fields:
+        raise SnapshotError(f"snapshot is missing required collector fields in {path}: {', '.join(missing_fields)}")
+
 
 def load_snapshot(path: Path) -> dict[str, Any]:
     try:
@@ -109,7 +146,7 @@ def load_snapshot(path: Path) -> dict[str, Any]:
         raise SnapshotError(f"could not read {path}: {error}") from error
     except SnapshotError:
         raise
-    except ValueError as error:
+    except (ValueError, RecursionError) as error:
         raise SnapshotError(f"invalid JSON in {path}: {error}") from error
     if not isinstance(raw, dict):
         raise SnapshotError(f"snapshot must be a JSON object: {path}")
@@ -171,6 +208,67 @@ def large_file_list_is_complete(data: dict[str, Any]) -> bool:
     return isinstance(value, list) and len(value) < 20
 
 
+def scan_scope(data: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "scan_mode": data.get("scan_mode", "filesystem"),
+        "include_path_patterns": sorted(set(data.get("include_path_patterns", []))),
+        "exclude_path_patterns": sorted(set(data.get("exclude_path_patterns", []))),
+        "scope_id": data.get("scope_id"),
+    }
+
+
+def logical_scope_limitations(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
+    limitations: list[str] = []
+    if sorted(set(before.get("excluded_directory_names", []))) != sorted(
+        set(after.get("excluded_directory_names", []))
+    ):
+        limitations.append("The excluded directory names differ between snapshots, so related deltas may not be comparable.")
+
+    before_scope = scan_scope(before)
+    after_scope = scan_scope(after)
+    labels = {
+        "scan_mode": "scan modes",
+        "include_path_patterns": "included path globs",
+        "exclude_path_patterns": "excluded path globs",
+        "scope_id": "scope IDs",
+    }
+    for field, label in labels.items():
+        if before_scope[field] != after_scope[field]:
+            limitations.append(f"The {label} differ between snapshots, so the logical scan scopes are not equivalent.")
+    roots_differ = before.get("root") != after.get("root")
+    shared_scope_id = bool(before_scope["scope_id"]) and before_scope["scope_id"] == after_scope["scope_id"]
+    if roots_differ and not shared_scope_id:
+        limitations.append(
+            "The snapshot roots differ without a shared non-empty scope ID, so equivalent logical scope cannot be confirmed."
+        )
+    return limitations
+
+
+def scan_is_complete(data: dict[str, Any]) -> bool:
+    return not data.get("scan_truncated") and not data.get("scan_incomplete_reasons", [])
+
+
+def scan_scope_limitations(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
+    limitations = logical_scope_limitations(before, after)
+
+    before_has_limit = "scan_file_limit" in before
+    after_has_limit = "scan_file_limit" in after
+    if before_has_limit != after_has_limit:
+        limitations.append(
+            "The scan file limit is unavailable in one snapshot, so equivalent scan scope cannot be confirmed."
+        )
+    elif before_has_limit and before["scan_file_limit"] != after["scan_file_limit"]:
+        limitations.append("The scan file limits differ between snapshots, so file-count deltas may not be comparable.")
+
+    if before.get("scan_truncated") or after.get("scan_truncated"):
+        limitations.append("At least one scan reached its file limit, so the comparison may be incomplete.")
+    if before.get("scan_incomplete_reasons") or after.get("scan_incomplete_reasons"):
+        limitations.append(
+            "At least one snapshot reports an incomplete scan, so scope-dependent deltas may not be comparable."
+        )
+    return limitations
+
+
 def append_set_change(
     changes: list[dict[str, Any]],
     before: dict[str, Any],
@@ -189,7 +287,11 @@ def append_set_change(
 def compare(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
     changes: list[dict[str, Any]] = []
     attention: list[dict[str, str]] = []
-    limitations: list[str] = []
+    limitations = scan_scope_limitations(before, after)
+    logical_scope_comparable = not logical_scope_limitations(before, after)
+    scans_complete = scan_is_complete(before) and scan_is_complete(after)
+    scope_alerts_comparable = logical_scope_comparable and scans_complete
+    large_threshold_comparable = before.get("large_file_threshold_bytes") == after.get("large_file_threshold_bytes")
 
     for field, label in SET_FIELDS.items():
         append_set_change(changes, before, after, field, label)
@@ -222,7 +324,7 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
             "after": new_markers,
             "delta": new_markers - old_markers,
         })
-        if new_markers > old_markers:
+        if new_markers > old_markers and scope_alerts_comparable:
             attention.append({
                 "code": "work-markers-increased",
                 "message": f"Comment-style work markers increased from {old_markers} to {new_markers}; review the new markers in context.",
@@ -244,7 +346,7 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
             "removed": sensitive_removed,
             "tracking_changed": tracking_changed,
         })
-    for path in sensitive_added:
+    for path in (sensitive_added if scope_alerts_comparable else []):
         status = new_sensitive[path]
         tracking = "tracked" if status is True else ("untracked" if status is False else "tracking unknown")
         attention.append({
@@ -252,7 +354,7 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
             "message": f"Sensitive-looking filename added: {markdown_code(path)} ({tracking}); verify that no secret is committed.",
         })
     for path in tracking_changed:
-        if new_sensitive[path] is True:
+        if scope_alerts_comparable and old_sensitive[path] is False and new_sensitive[path] is True:
             attention.append({
                 "code": "sensitive-file-now-tracked",
                 "message": f"Sensitive-looking file is now tracked: {markdown_code(path)}; verify its contents without exposing values.",
@@ -261,8 +363,9 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
     old_large = large_file_map(before)
     new_large = large_file_map(after)
     large_lists_complete = large_file_list_is_complete(before) and large_file_list_is_complete(after)
-    scans_complete = not before.get("scan_truncated") and not after.get("scan_truncated")
-    large_inventory_comparable = large_lists_complete and scans_complete
+    large_inventory_comparable = (
+        large_lists_complete and scans_complete and logical_scope_comparable and large_threshold_comparable
+    )
     large_added = sorted(set(new_large) - set(old_large)) if large_inventory_comparable else []
     large_removed = sorted(set(old_large) - set(new_large)) if large_inventory_comparable else []
     large_resized = [
@@ -288,7 +391,11 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
     for item in large_resized:
         before_size = item["before_bytes"]
         after_size = item["after_bytes"]
-        if item["delta_bytes"] >= LARGE_GROWTH_MIN_BYTES and after_size >= max(1, before_size) * 1.5:
+        if (
+            scope_alerts_comparable
+            and item["delta_bytes"] >= LARGE_GROWTH_MIN_BYTES
+            and after_size * 2 >= max(1, before_size) * 3
+        ):
             attention.append({
                 "code": "large-file-grew-significantly",
                 "message": (
@@ -303,37 +410,28 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
         ("license_files", "License file disappeared"),
     )
     for field, message in loss_rules:
-        if string_set(before, field) and not string_set(after, field):
+        if scope_alerts_comparable and string_set(before, field) and not string_set(after, field):
             attention.append({"code": f"{field}-removed", "message": f"{message}; confirm that this was intentional."})
-    if int_value(before, "test_file_count") > 0 and int_value(after, "test_file_count") == 0:
+    if scope_alerts_comparable and int_value(before, "test_file_count") > 0 and int_value(after, "test_file_count") == 0:
         attention.append({"code": "tests-disappeared", "message": "Test files changed from a nonzero count to zero; confirm that tests were not lost."})
 
-    for label, field in (
-        ("excluded directory names", "excluded_directory_names"),
-        ("large-file threshold", "large_file_threshold_bytes"),
-    ):
-        if before.get(field) != after.get(field):
-            limitations.append(f"The {label} differ between snapshots, so related deltas may not be comparable.")
-    before_has_limit = "scan_file_limit" in before
-    after_has_limit = "scan_file_limit" in after
-    if before_has_limit != after_has_limit:
+    if not large_threshold_comparable:
         limitations.append(
-            "The scan file limit is unavailable in one snapshot, so equivalent scan scope cannot be confirmed."
+            "The large-file thresholds differ between snapshots, so large-file additions and removals are not comparable."
         )
-    elif before_has_limit and before["scan_file_limit"] != after["scan_file_limit"]:
-        limitations.append("The scan file limits differ between snapshots, so file-count deltas may not be comparable.")
     if not large_lists_complete:
         limitations.append(
             "At least one snapshot may contain only the legacy top-20 large-file list, so large-file additions and removals were not compared."
         )
     if before.get("scan_truncated") or after.get("scan_truncated"):
-        limitations.append("At least one scan reached its file limit, so the comparison may be incomplete.")
         attention.append({"code": "scan-truncated", "message": "At least one snapshot is truncated; rerun with a higher --max-files value."})
 
     return {
         "schema_version": 1,
         "before_root": before.get("root"),
         "after_root": after.get("root"),
+        "before_scan_scope": scan_scope(before),
+        "after_scan_scope": scan_scope(after),
         "changes": changes,
         "attention": attention,
         "limitations": limitations,
@@ -341,6 +439,8 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
             "change_count": len(changes),
             "attention_count": len(attention),
             "comparable": not limitations,
+            "logical_scope_comparable": logical_scope_comparable,
+            "scans_complete": scans_complete,
         },
     }
 
@@ -348,7 +448,9 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
 def markdown_code(value: object) -> str:
     """Render untrusted data as a single safe Markdown code span."""
     text = "".join(
-        " " if char.isspace() else char if ord(char) >= 32 and not 127 <= ord(char) <= 159 else "?"
+        " " if char.isspace() else char
+        if ord(char) >= 32 and not 127 <= ord(char) <= 159 and not 0xD800 <= ord(char) <= 0xDFFF
+        else "?"
         for char in str(value)
     )
     longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
@@ -358,12 +460,23 @@ def markdown_code(value: object) -> str:
 
 
 def human_bytes(value: int) -> str:
-    amount = float(value)
-    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
-        if amount < 1024 or unit == "TiB":
-            return f"{amount:.0f} {unit}" if unit == "B" else f"{amount:.1f} {unit}"
-        amount /= 1024
-    return f"{value} B"
+    units = ("B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB", "ZiB", "YiB")
+    if value < 0:
+        return f"-{human_bytes(-value)}"
+    if value < 1024:
+        return f"{value} B"
+    unit_index = 0
+    divisor = 1
+    while unit_index < len(units) - 1 and value >= divisor * 1024:
+        divisor *= 1024
+        unit_index += 1
+    tenths = (value * 10 + divisor // 2) // divisor
+    # Avoid Python's configurable huge-integer decimal conversion limit while
+    # still giving a useful order of magnitude for adversarially large values.
+    if tenths.bit_length() > 1500:
+        binary_exponent = max(0, value.bit_length() - 1 - 10 * unit_index)
+        return f"~2^{binary_exponent} {units[unit_index]}"
+    return f"{tenths // 10}.{tenths % 10} {units[unit_index]}"
 
 
 def display_items(values: Iterable[str], limit: int = 20) -> str:
@@ -398,14 +511,26 @@ def render_change(change: dict[str, Any]) -> str:
 
 def to_markdown(result: dict[str, Any]) -> str:
     summary = result["summary"]
+    before_scope = result.get("before_scan_scope", {})
+    after_scope = result.get("after_scan_scope", {})
     lines = [
         "# Repository signal comparison",
         "",
         f"- Before: {markdown_code(result['before_root'] or 'Unknown')}",
         f"- After: {markdown_code(result['after_root'] or 'Unknown')}",
+        f"- Before scan mode: {markdown_code(before_scope.get('scan_mode', 'filesystem'))}",
+        f"- After scan mode: {markdown_code(after_scope.get('scan_mode', 'filesystem'))}",
+        f"- Before scope ID: {markdown_code(before_scope.get('scope_id')) if before_scope.get('scope_id') is not None else 'None'}",
+        f"- After scope ID: {markdown_code(after_scope.get('scope_id')) if after_scope.get('scope_id') is not None else 'None'}",
+        f"- Before included path globs: {display_items(before_scope.get('include_path_patterns', []))}",
+        f"- After included path globs: {display_items(after_scope.get('include_path_patterns', []))}",
+        f"- Before excluded path globs: {display_items(before_scope.get('exclude_path_patterns', []))}",
+        f"- After excluded path globs: {display_items(after_scope.get('exclude_path_patterns', []))}",
         f"- Changed dimensions: {summary['change_count']}",
         f"- Attention items: {summary['attention_count']}",
         f"- Directly comparable: {'yes' if summary['comparable'] else 'no'}",
+        f"- Logical scan scope equivalent: {'yes' if summary.get('logical_scope_comparable', summary['comparable']) else 'no'}",
+        f"- Scans complete: {'yes' if summary.get('scans_complete', True) else 'no'}",
         "",
         "## Changes",
         "",
@@ -435,6 +560,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--format", choices=("markdown", "json"), default="markdown")
     parser.add_argument("--output", type=Path, help="Write output to this file instead of stdout")
     parser.add_argument("--fail-on-attention", action="store_true", help="Exit 1 when attention items exist")
+    parser.add_argument("--require-comparable", action="store_true", help="Exit 1 when comparison limitations exist")
     return parser.parse_args()
 
 
@@ -445,16 +571,22 @@ def main() -> int:
     except SnapshotError as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
-    output = json.dumps(result, indent=2, ensure_ascii=False) + "\n" if args.format == "json" else to_markdown(result)
+    output = json.dumps(result, indent=2, ensure_ascii=True) + "\n" if args.format == "json" else to_markdown(result)
     if args.output:
         try:
             args.output.write_text(output, encoding="utf-8")
-        except OSError as error:
+        except (OSError, UnicodeError) as error:
             print(f"error: could not write output: {error}", file=sys.stderr)
             return 2
     else:
-        sys.stdout.write(output)
-    return 1 if args.fail_on_attention and result["attention"] else 0
+        try:
+            sys.stdout.write(output)
+        except (OSError, UnicodeError) as error:
+            print(f"error: could not write output: {error}", file=sys.stderr)
+            return 2
+    attention_failed = args.fail_on_attention and bool(result["attention"])
+    comparability_failed = args.require_comparable and not result["summary"]["comparable"]
+    return 1 if attention_failed or comparability_failed else 0
 
 
 if __name__ == "__main__":

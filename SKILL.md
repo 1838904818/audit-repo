@@ -26,7 +26,9 @@ python scripts/collect_repo_signals.py /path/to/repo --format markdown
 
 Use `--format json` when structured output will make further analysis easier. JSON snapshots record the scan file limit and retain the complete large-file inventory; Markdown keeps long lists bounded. The collector also surfaces Git state, declared project scripts, configured tools, dependency-update files, ownership, containers, and CI action references. It ignores common dependency/build directories, does not follow symlinks, and checks only paths and Git tracking state, not contents, for sensitive-looking files.
 
-Use repeatable `--exclude-dir NAME` options for repository-specific generated folders. Adjust large-file review with `--large-file-mib MIB`; do not lower it so far that ordinary source files create noise.
+Use the default `filesystem` scan for broad discovery, including ignored and untracked files outside the built-in exclusions. For a Git working tree, `--scan-mode git-visible` includes tracked and non-ignored untracked files, while `--scan-mode tracked` creates the most stable CI baseline but intentionally omits every untracked sensitive file. Tracked files remain included even if they match an ignore rule. Do not use a narrower mode without making that coverage limit explicit in the report. Repeat `git-visible` comparisons require the same effective repository and global Git ignore configuration.
+
+Use repeatable `--include-path GLOB` and `--exclude-path GLOB` options for a monorepo scope and set a stable `--scope-id` when equivalent checkouts may have different absolute roots. Patterns are case-sensitive, root-relative POSIX globs; exclusions win. Use repeatable `--exclude-dir NAME` options for repository-specific generated folder names. Adjust large-file review with `--large-file-mib MIB`; do not lower it so far that ordinary source files create noise.
 
 If Python is unavailable, gather equivalent signals with available read-only tools. Do not install a runtime just for the inventory.
 
@@ -38,7 +40,7 @@ python scripts/collect_repo_signals.py /path/to/repo --format json --output afte
 python scripts/compare_repo_signals.py before.json after.json --format markdown
 ```
 
-Use `--fail-on-attention` only in automation where exit code `1` should flag high-confidence attention items. Exit code `2` means invalid input or an execution error. Compare snapshots made with the same scope, exclusions, file limit, and large-file threshold. The comparer marks recorded configuration mismatches and incomplete legacy top-20 large-file inventories as limitations; treat reported changes as leads to verify, not findings.
+Use `--fail-on-attention` only in automation where exit code `1` should flag high-confidence attention items. Add `--require-comparable` when limitations must also fail the gate. Exit code `2` means invalid input or an execution error. Compare snapshots made with the same mode, logical scope, exclusions, and large-file threshold; use a stable non-empty scope ID for equivalent checkouts at different absolute roots. A different file limit is still reported, but does not suppress logical-scope alerts when both scans completed. Missing tracked worktree files, truncation, configuration mismatches, and incomplete legacy top-20 large-file inventories are limitations. Treat reported changes as leads to verify, not findings.
 
 ### 3. Understand the project before judging it
 

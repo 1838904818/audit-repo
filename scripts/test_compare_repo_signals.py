@@ -24,6 +24,10 @@ def snapshot(**overrides: object) -> dict[str, object]:
         "schema_version": 1,
         "root": "/repo",
         "file_count": 10,
+        "scan_mode": "filesystem",
+        "include_path_patterns": [],
+        "exclude_path_patterns": [],
+        "scope_id": None,
         "scan_file_limit": 50_000,
         "scan_truncated": False,
         "excluded_directory_names": [],
@@ -87,6 +91,7 @@ class CompareRepoSignalsTests(unittest.TestCase):
         result = MODULE.compare(snapshot(scan_file_limit=50_000), snapshot(scan_file_limit=100_000))
 
         self.assertFalse(result["summary"]["comparable"])
+        self.assertTrue(result["summary"]["logical_scope_comparable"])
         self.assertEqual(result["summary"]["attention_count"], 0)
         self.assertIn("scan file limits differ", result["limitations"][0])
 
@@ -100,6 +105,76 @@ class CompareRepoSignalsTests(unittest.TestCase):
         older_before.pop("scan_file_limit")
         older_after.pop("scan_file_limit")
         self.assertTrue(MODULE.compare(older_before, older_after)["summary"]["comparable"])
+
+    def test_different_unreached_scan_limits_do_not_suppress_attention(self) -> None:
+        result = MODULE.compare(
+            snapshot(scan_file_limit=50_000),
+            snapshot(scan_file_limit=100_000, work_markers={"TODO": 2}, ci_files=[]),
+        )
+        codes = {item["code"] for item in result["attention"]}
+
+        self.assertFalse(result["summary"]["comparable"])
+        self.assertTrue(result["summary"]["logical_scope_comparable"])
+        self.assertTrue(result["summary"]["scans_complete"])
+        self.assertIn("work-markers-increased", codes)
+        self.assertIn("ci_files-removed", codes)
+        self.assertFalse(any("logical scan scopes" in item for item in result["limitations"]))
+
+    def test_scan_scope_mismatch_suppresses_unreliable_attention(self) -> None:
+        before = snapshot()
+        after = snapshot(
+            scan_mode="tracked",
+            include_path_patterns=["packages/api/*"],
+            scope_id="api",
+            ci_files=[],
+            test_file_count=0,
+            work_markers={"TODO": 9},
+            sensitive_looking_files=[{"path": ".env", "tracked": True}],
+            large_files=[{"path": "new.bin", "bytes": 10_000_000}],
+        )
+
+        result = MODULE.compare(before, after)
+        codes = {item["code"] for item in result["attention"]}
+
+        self.assertFalse(result["summary"]["comparable"])
+        self.assertEqual(codes, set())
+        self.assertTrue(any("scan modes differ" in item for item in result["limitations"]))
+        self.assertTrue(any("included path globs differ" in item for item in result["limitations"]))
+        self.assertTrue(any("scope IDs differ" in item for item in result["limitations"]))
+
+    def test_legacy_scope_defaults_match_new_filesystem_defaults(self) -> None:
+        legacy = snapshot()
+        for field in ("scan_mode", "include_path_patterns", "exclude_path_patterns", "scope_id"):
+            legacy.pop(field)
+
+        result = MODULE.compare(legacy, snapshot())
+
+        self.assertTrue(result["summary"]["comparable"])
+        self.assertEqual(result["limitations"], [])
+
+    def test_shared_scope_id_allows_equivalent_checkouts_at_different_roots(self) -> None:
+        without_id = MODULE.compare(snapshot(root="/runner-a/repo"), snapshot(root="/runner-b/repo"))
+        with_id = MODULE.compare(
+            snapshot(root="/runner-a/repo", scope_id="whole-repository"),
+            snapshot(root="/runner-b/repo", scope_id="whole-repository"),
+        )
+
+        self.assertFalse(without_id["summary"]["comparable"])
+        self.assertTrue(any("roots differ" in item for item in without_id["limitations"]))
+        self.assertTrue(with_id["summary"]["comparable"])
+
+    def test_comparison_markdown_displays_both_complete_path_scopes(self) -> None:
+        result = MODULE.compare(
+            snapshot(scope_id="api", include_path_patterns=["packages/api/*"]),
+            snapshot(scope_id="web", exclude_path_patterns=["packages/web/generated/*"]),
+        )
+
+        rendered = MODULE.to_markdown(result)
+
+        self.assertIn("Before scope ID: `api`", rendered)
+        self.assertIn("After scope ID: `web`", rendered)
+        self.assertIn("Before included path globs: `packages/api/*`", rendered)
+        self.assertIn("After excluded path globs: `packages/web/generated/*`", rendered)
 
     def test_legacy_top_20_large_file_list_suppresses_unreliable_additions(self) -> None:
         legacy_files = [{"path": f"large-{index:02}.bin", "bytes": 10_000_000 + index} for index in range(20)]
@@ -125,6 +200,44 @@ class CompareRepoSignalsTests(unittest.TestCase):
         self.assertIn("scan-truncated", codes)
         self.assertFalse(any(change["field"] == "large_files" for change in result["changes"]))
 
+    def test_explicit_incomplete_scan_suppresses_scope_dependent_attention(self) -> None:
+        result = MODULE.compare(
+            snapshot(),
+            snapshot(
+                scan_incomplete_reasons=["permission-denied"],
+                work_markers={"TODO": 9},
+                test_file_count=0,
+                ci_files=[],
+                sensitive_looking_files=[{"path": ".env", "tracked": True}],
+                large_files=[{"path": "new.bin", "bytes": 10_000_000}],
+            ),
+        )
+
+        self.assertFalse(result["summary"]["comparable"])
+        self.assertTrue(result["summary"]["logical_scope_comparable"])
+        self.assertFalse(result["summary"]["scans_complete"])
+        self.assertEqual(result["attention"], [])
+        self.assertTrue(any("reports an incomplete scan" in item for item in result["limitations"]))
+
+    def test_sensitive_tracking_attention_requires_false_to_true_transition(self) -> None:
+        unknown_to_tracked = MODULE.compare(
+            snapshot(sensitive_looking_files=[{"path": ".env", "tracked": None}]),
+            snapshot(sensitive_looking_files=[{"path": ".env", "tracked": True}]),
+        )
+        untracked_to_tracked = MODULE.compare(
+            snapshot(sensitive_looking_files=[{"path": ".env", "tracked": False}]),
+            snapshot(sensitive_looking_files=[{"path": ".env", "tracked": True}]),
+        )
+
+        self.assertNotIn(
+            "sensitive-file-now-tracked",
+            {item["code"] for item in unknown_to_tracked["attention"]},
+        )
+        self.assertIn(
+            "sensitive-file-now-tracked",
+            {item["code"] for item in untracked_to_tracked["attention"]},
+        )
+
     def test_reports_significant_growth_of_existing_large_file(self) -> None:
         before = snapshot(large_files=[{"path": "model.bin", "bytes": 6_000_000}])
         after = snapshot(large_files=[{"path": "model.bin", "bytes": 6_000_000_000}])
@@ -137,11 +250,55 @@ class CompareRepoSignalsTests(unittest.TestCase):
         self.assertEqual(change["resized"][0]["path"], "model.bin")
         self.assertIn("5.6 GiB", MODULE.to_markdown(result))
 
+    def test_threshold_mismatch_keeps_common_growth_but_suppresses_inventory_deltas(self) -> None:
+        result = MODULE.compare(
+            snapshot(
+                large_file_threshold_bytes=5 * 1024 * 1024,
+                large_files=[{"path": "model.bin", "bytes": 6 * 1024 * 1024}],
+            ),
+            snapshot(
+                large_file_threshold_bytes=1024 * 1024,
+                large_files=[
+                    {"path": "model.bin", "bytes": 12 * 1024 * 1024},
+                    {"path": "threshold-only.bin", "bytes": 2 * 1024 * 1024},
+                ],
+            ),
+        )
+
+        change = next(item for item in result["changes"] if item["field"] == "large_files")
+        self.assertEqual(change["added"], [])
+        self.assertEqual(change["resized"][0]["path"], "model.bin")
+        self.assertIn("large-file-grew-significantly", {item["code"] for item in result["attention"]})
+        self.assertTrue(any("additions and removals" in item for item in result["limitations"]))
+
+    def test_arbitrarily_large_byte_counts_do_not_use_floats(self) -> None:
+        huge = 10**400
+        result = MODULE.compare(
+            snapshot(large_files=[{"path": "model.bin", "bytes": huge}]),
+            snapshot(large_files=[{"path": "model.bin", "bytes": huge * 2}]),
+        )
+
+        self.assertIn(
+            "large-file-grew-significantly",
+            {item["code"] for item in result["attention"]},
+        )
+        self.assertIn("YiB", MODULE.to_markdown(result))
+        self.assertIn("YiB", MODULE.human_bytes(10**10_000))
+        self.assertIn("YiB", MODULE.human_bytes(-(10**10_000)))
+
     def test_loads_legacy_snapshot_and_rejects_unknown_schema(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "snapshot.json"
-            path.write_text(json.dumps({"root": "/legacy"}), encoding="utf-8")
+            legacy = snapshot(root="/legacy")
+            legacy.pop("schema_version")
+            path.write_text(json.dumps(legacy), encoding="utf-8")
             self.assertEqual(MODULE.load_snapshot(path)["root"], "/legacy")
+
+            for impostor in ({}, {"schema_version": 1}, {"root": "/not-a-snapshot"}):
+                with self.subTest(impostor=impostor):
+                    path.write_text(json.dumps(impostor), encoding="utf-8")
+                    with self.assertRaises(MODULE.SnapshotError):
+                        MODULE.load_snapshot(path)
 
             path.write_text(json.dumps({"schema_version": 99}), encoding="utf-8")
             with self.assertRaises(MODULE.SnapshotError):
@@ -154,6 +311,30 @@ class CompareRepoSignalsTests(unittest.TestCase):
             for invalid in (-1, True, "50000", None):
                 with self.subTest(scan_file_limit=invalid):
                     path.write_text(json.dumps({"schema_version": 1, "scan_file_limit": invalid}), encoding="utf-8")
+                    with self.assertRaises(MODULE.SnapshotError):
+                        MODULE.load_snapshot(path)
+
+            for invalid_mode in ("unknown", 1, []):
+                with self.subTest(scan_mode=invalid_mode):
+                    path.write_text(json.dumps({"schema_version": 1, "scan_mode": invalid_mode}), encoding="utf-8")
+                    with self.assertRaises(MODULE.SnapshotError):
+                        MODULE.load_snapshot(path)
+
+            for invalid_scope_id in ("", "   ", "\N{NO-BREAK SPACE}", "line\nfeed", "x" * 201, 1, []):
+                with self.subTest(scope_id=invalid_scope_id):
+                    path.write_text(
+                        json.dumps({"schema_version": 1, "scope_id": invalid_scope_id}),
+                        encoding="utf-8",
+                    )
+                    with self.assertRaises(MODULE.SnapshotError):
+                        MODULE.load_snapshot(path)
+
+            for invalid_reasons in (None, "permission-denied", [1]):
+                with self.subTest(scan_incomplete_reasons=invalid_reasons):
+                    path.write_text(
+                        json.dumps({"schema_version": 1, "scan_incomplete_reasons": invalid_reasons}),
+                        encoding="utf-8",
+                    )
                     with self.assertRaises(MODULE.SnapshotError):
                         MODULE.load_snapshot(path)
 
@@ -190,6 +371,83 @@ class CompareRepoSignalsTests(unittest.TestCase):
             self.assertIn("Sensitive-looking filename added", result.stdout)
             self.assertEqual(result.stderr, "")
 
+    def test_cli_require_comparable_handles_limitations_only_and_combines(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            before_path = Path(temp_dir) / "before.json"
+            after_path = Path(temp_dir) / "after.json"
+            before_path.write_text(json.dumps(snapshot()), encoding="utf-8")
+            after_path.write_text(
+                json.dumps(snapshot(scan_incomplete_reasons=["permission-denied"])),
+                encoding="utf-8",
+            )
+
+            without_gate = subprocess.run(
+                [sys.executable, str(MODULE_PATH), str(before_path), str(after_path)],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=10,
+            )
+            with_gate = subprocess.run(
+                [
+                    sys.executable,
+                    str(MODULE_PATH),
+                    str(before_path),
+                    str(after_path),
+                    "--require-comparable",
+                    "--fail-on-attention",
+                ],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=10,
+            )
+
+            self.assertEqual(without_gate.returncode, 0)
+            self.assertEqual(with_gate.returncode, 1)
+            self.assertIn("Attention items: 0", with_gate.stdout)
+            self.assertIn("Directly comparable: no", with_gate.stdout)
+            self.assertEqual(with_gate.stderr, "")
+
+            after_path.write_text(
+                json.dumps(snapshot(sensitive_looking_files=[{"path": ".env", "tracked": True}])),
+                encoding="utf-8",
+            )
+            comparable_with_attention = subprocess.run(
+                [
+                    sys.executable,
+                    str(MODULE_PATH),
+                    str(before_path),
+                    str(after_path),
+                    "--require-comparable",
+                ],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=10,
+            )
+            both_gates = subprocess.run(
+                [
+                    sys.executable,
+                    str(MODULE_PATH),
+                    str(before_path),
+                    str(after_path),
+                    "--require-comparable",
+                    "--fail-on-attention",
+                ],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=10,
+            )
+
+            self.assertEqual(comparable_with_attention.returncode, 0)
+            self.assertEqual(both_gates.returncode, 1)
+
     def test_cli_rejects_malformed_snapshot_without_traceback(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             before_path = Path(temp_dir) / "before.json"
@@ -209,6 +467,47 @@ class CompareRepoSignalsTests(unittest.TestCase):
             self.assertEqual(result.returncode, 2)
             self.assertIn("must be a list", result.stderr)
             self.assertNotIn("Traceback", result.stderr)
+
+            before_path.write_text("[" * 1200 + "0" + "]" * 1200, encoding="utf-8")
+            nested = subprocess.run(
+                [sys.executable, str(MODULE_PATH), str(before_path), str(after_path)],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(nested.returncode, 2)
+            self.assertIn("error:", nested.stderr)
+            self.assertNotIn("Traceback", nested.stderr)
+
+    def test_cli_rejects_oversized_marker_counts_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            before_path = Path(temp_dir) / "before.json"
+            after_path = Path(temp_dir) / "after.json"
+            before_path.write_text(json.dumps(snapshot()), encoding="utf-8")
+            huge_marker = 10**4299
+            after_path.write_text(
+                json.dumps(snapshot(work_markers={str(index): huge_marker for index in range(10)})),
+                encoding="utf-8",
+            )
+
+            for output_format in ("markdown", "json"):
+                with self.subTest(output_format=output_format):
+                    result = subprocess.run(
+                        [
+                            sys.executable, str(MODULE_PATH), str(before_path), str(after_path),
+                            "--format", output_format,
+                        ],
+                        check=False,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        timeout=10,
+                    )
+                    self.assertEqual(result.returncode, 2)
+                    self.assertIn("work_markers", result.stderr)
+                    self.assertNotIn("Traceback", result.stderr)
 
     def test_cli_rejects_non_finite_json_number(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -230,6 +529,40 @@ class CompareRepoSignalsTests(unittest.TestCase):
             self.assertIn("non-finite JSON number", result.stderr)
             self.assertNotIn("Traceback", result.stderr)
 
+    def test_cli_safely_compares_collector_surrogate_paths_in_each_format(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            before_path = Path(temp_dir) / "before.json"
+            after_path = Path(temp_dir) / "after.json"
+            before_path.write_text(json.dumps(snapshot(root="\ud800")), encoding="utf-8")
+            after_path.write_text(json.dumps(snapshot()), encoding="utf-8")
+
+            for output_format in ("markdown", "json"):
+                with self.subTest(output_format=output_format):
+                    result = subprocess.run(
+                        [
+                            sys.executable,
+                            str(MODULE_PATH),
+                            str(before_path),
+                            str(after_path),
+                            "--format",
+                            output_format,
+                        ],
+                        check=False,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        timeout=10,
+                    )
+
+                    self.assertEqual(result.returncode, 0)
+                    self.assertNotIn("Traceback", result.stderr)
+                    self.assertEqual(result.stderr, "")
+                    result.stdout.encode("utf-8")
+                    if output_format == "json":
+                        self.assertIn("\\ud800", result.stdout)
+                    else:
+                        self.assertIn("?", result.stdout)
+
     def test_markdown_escapes_untrusted_snapshot_fields(self) -> None:
         before = snapshot(root="repo`\n\n## Forged result")
         after = snapshot(
@@ -241,6 +574,20 @@ class CompareRepoSignalsTests(unittest.TestCase):
 
         self.assertNotIn("\n## Forged result", rendered)
         self.assertNotIn("\n- forged", rendered)
+
+    def test_markdown_escapes_new_scope_fields_and_surrogates(self) -> None:
+        malicious_scope = "api`\n\n## Forged scope"
+        malicious_glob = "packages/*`\n- forged scope item"
+        result = MODULE.compare(
+            snapshot(scope_id=malicious_scope, include_path_patterns=[malicious_glob]),
+            snapshot(scope_id=malicious_scope, include_path_patterns=[malicious_glob]),
+        )
+
+        rendered = MODULE.to_markdown(result)
+
+        self.assertNotIn("\n## Forged scope", rendered)
+        self.assertNotIn("\n- forged scope item", rendered)
+        self.assertEqual(MODULE.markdown_code("bad\ud800value"), "`bad?value`")
 
 
 if __name__ == "__main__":

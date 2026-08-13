@@ -2,6 +2,30 @@
 
 All notable changes to `audit-repo` are documented here. The project follows semantic versioning.
 
+## [1.3.0] - 2026-08-13
+
+### Added
+
+- Add `filesystem`, `git-visible`, and `tracked` scan modes for discovery, large repositories, and stable CI baselines.
+- Add repeatable case-sensitive include/exclude path globs and a stable logical scope ID for monorepos.
+- Record scan mode and path scope in JSON snapshots and comparison reports.
+- Add `--require-comparable` for automation that must reject comparison limitations.
+- Add a project code of conduct.
+
+### Changed
+
+- Mark scope configuration changes as comparison limitations and suppress high-confidence alerts that could be caused by a changed scope.
+- Detect incomplete Git worktrees, including missing sparse-checkout paths, instead of silently treating them as complete scans.
+- Keep older snapshots compatible by treating missing mode and path fields as the historical filesystem defaults.
+
+### Fixed
+
+- Preserve non-UTF-8 Git paths, safely render untrusted Git metadata, and handle very large supported JSON integers without tracebacks.
+- Reject JSON objects that do not contain the minimum collector snapshot structure.
+- Record filesystem and Git worktree enumeration failures as incomplete scans.
+- Avoid suppressing valid alerts solely because two complete scans used different file limits.
+- Report a sensitive file as newly tracked only when its prior state was explicitly untracked.
+
 ## [1.2.0] - 2026-08-13
 
 ### Added
@@ -41,6 +65,7 @@ All notable changes to `audit-repo` are documented here. The project follows sem
 
 - First stable release of the Codex Skill, repository signal collector, snapshot comparer, tests, and CI.
 
+[1.3.0]: https://github.com/1838904818/audit-repo/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/1838904818/audit-repo/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/1838904818/audit-repo/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/1838904818/audit-repo/compare/v1.0.0...v1.0.1

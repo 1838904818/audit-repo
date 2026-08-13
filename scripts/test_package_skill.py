@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import re
 import tempfile
 import unittest
 import zipfile
@@ -39,6 +40,18 @@ class PackageSkillTests(unittest.TestCase):
                 self.assertTrue(all((info.external_attr >> 16) & 0o777 == 0o644 for info in bundle.infolist()))
                 self.assertNotIn("audit-repo/.github/workflows/ci.yml", names)
                 self.assertFalse(any("test_" in name or "__pycache__" in name for name in names))
+
+                packaged = set(names)
+                markdown_link = re.compile(r"\[[^]]*\]\(([^)]+)\)")
+                for name in names:
+                    if not name.endswith(".md"):
+                        continue
+                    source = bundle.read(name).decode("utf-8")
+                    for target in markdown_link.findall(source):
+                        if target.startswith(("https://", "http://", "mailto:", "#")):
+                            continue
+                        resolved = (Path(name).parent / target.split("#", 1)[0]).as_posix()
+                        self.assertIn(resolved, packaged, f"broken packaged link in {name}: {target}")
 
     def test_normalizes_text_line_endings(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

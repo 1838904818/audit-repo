@@ -5,11 +5,14 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 MODULE_PATH = Path(__file__).with_name("collect_repo_signals.py")
@@ -175,6 +178,62 @@ class CollectRepoSignalsTests(unittest.TestCase):
             self.assertEqual(data["large_files"][0]["path"], "keep.py")
             self.assertEqual(data["work_markers"], {})
 
+    def test_filesystem_enumeration_errors_mark_scan_incomplete(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "ok.py").write_text("print('ok')", encoding="utf-8")
+
+            def walk_with_error(_root: Path, *, followlinks: bool, onerror: object):
+                self.assertFalse(followlinks)
+                assert callable(onerror)
+                onerror(PermissionError("denied"))
+                yield str(root), [], ["ok.py"]
+
+            with mock.patch.object(MODULE.os, "walk", side_effect=walk_with_error):
+                data = MODULE.collect(root, 100)
+
+            self.assertEqual(data["file_count"], 1)
+            self.assertEqual(
+                data["scan_incomplete_reasons"],
+                ["filesystem_directories_unavailable_during_scan"],
+            )
+
+    def test_file_becoming_unavailable_during_analysis_marks_scan_incomplete(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            readme = root / "README.md"
+            readme.write_text("# Example", encoding="utf-8")
+            original_stat = Path.stat
+            readme_stat_calls = 0
+
+            def flaky_stat(path: Path, *args: object, **kwargs: object):
+                nonlocal readme_stat_calls
+                if path == readme:
+                    readme_stat_calls += 1
+                    if readme_stat_calls >= 2:
+                        raise PermissionError("became unavailable")
+                return original_stat(path, *args, **kwargs)
+
+            with mock.patch.object(Path, "stat", new=flaky_stat):
+                data = MODULE.collect(root, 100)
+
+            self.assertEqual(data["file_count"], 1)
+            self.assertIn("README.md", data["documentation"])
+            self.assertEqual(data["scan_incomplete_reasons"], ["paths_unavailable_during_analysis"])
+
+    def test_malformed_package_json_complexity_does_not_abort_collection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            package = root / "package.json"
+            for content in (
+                '{"oversized":' + "9" * 5000 + "}",
+                '{"nested":' + "[" * 1200 + "0" + "]" * 1200 + "}",
+            ):
+                with self.subTest(kind=content[:20]):
+                    package.write_text(content, encoding="utf-8")
+                    data = MODULE.collect(root, 100)
+                    self.assertEqual(data["automation"]["package_scripts"], {"package.json": []})
+
     def test_json_keeps_complete_large_file_inventory_while_markdown_is_bounded(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -190,17 +249,209 @@ class CollectRepoSignalsTests(unittest.TestCase):
             self.assertIn("3 more recorded in JSON output", rendered)
             self.assertNotIn("`large-00.bin`", rendered)
 
+    @unittest.skipUnless(shutil.which("git"), "Git is required for scan-mode coverage")
+    def test_git_scan_modes_distinguish_visible_tracked_and_ignored_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subprocess.run(["git", "-C", str(root), "init", "-q"], check=True, timeout=10)
+            (root / ".gitignore").write_text("ignored.py\n.env.local\n", encoding="utf-8")
+            (root / "tracked.py").write_text("print('tracked')", encoding="utf-8")
+            (root / "visible.py").write_text("print('visible')", encoding="utf-8")
+            (root / "ignored.py").write_text("print('ignored')", encoding="utf-8")
+            (root / ".env.local").write_text("SECRET=force-added", encoding="utf-8")
+            (root / "packages" / "api").mkdir(parents=True)
+            (root / "packages" / "api" / "app.py").write_text("print('api')", encoding="utf-8")
+            subprocess.run(
+                ["git", "-C", str(root), "add", ".gitignore", "tracked.py", "packages/api/app.py"],
+                check=True,
+                timeout=10,
+            )
+            subprocess.run(
+                ["git", "-C", str(root), "add", "-f", ".env.local"],
+                check=True,
+                timeout=10,
+            )
+
+            filesystem = MODULE.collect(root, 100, scan_mode="filesystem")
+            visible = MODULE.collect(root, 100, scan_mode="git-visible")
+            tracked = MODULE.collect(root, 100, scan_mode="tracked")
+            subdirectory = MODULE.collect(root / "packages" / "api", 100, scan_mode="tracked")
+
+            self.assertEqual(filesystem["languages_by_file_count"]["Python"], 4)
+            self.assertEqual(visible["languages_by_file_count"]["Python"], 3)
+            self.assertEqual(tracked["languages_by_file_count"]["Python"], 2)
+            self.assertEqual(subdirectory["languages_by_file_count"]["Python"], 1)
+            self.assertEqual(subdirectory["scan_mode"], "tracked")
+            for snapshot in (filesystem, visible, tracked):
+                sensitive = {item["path"]: item["tracked"] for item in snapshot["sensitive_looking_files"]}
+                self.assertTrue(sensitive[".env.local"])
+            self.assertEqual(visible["scan_incomplete_reasons"], [])
+            self.assertEqual(tracked["scan_incomplete_reasons"], [])
+
+    @unittest.skipUnless(shutil.which("git"), "Git is required for scan-limit coverage")
+    def test_git_limit_counts_only_files_after_path_filters(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subprocess.run(["git", "-C", str(root), "init", "-q"], check=True, timeout=10)
+            for relative in ("outside.py", "keep/a.py", "keep/b.py", "keep/c.py"):
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("print('ok')", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", "."], check=True, timeout=10)
+
+            exact = MODULE.collect(
+                root,
+                2,
+                scan_mode="tracked",
+                include_paths=["keep/*"],
+                exclude_paths=["keep/c.py"],
+            )
+            over_limit = MODULE.collect(root, 2, scan_mode="tracked", include_paths=["keep/*"])
+
+            self.assertEqual(exact["file_count"], 2)
+            self.assertFalse(exact["scan_truncated"])
+            self.assertEqual(over_limit["file_count"], 2)
+            self.assertTrue(over_limit["scan_truncated"])
+
+    @unittest.skipUnless(shutil.which("git"), "Git is required for incomplete-scan coverage")
+    def test_git_scan_reports_enumerated_paths_missing_from_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subprocess.run(["git", "-C", str(root), "init", "-q"], check=True, timeout=10)
+            (root / "present.py").write_text("print('present')", encoding="utf-8")
+            missing = root / "missing.py"
+            missing.write_text("print('missing')", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", "."], check=True, timeout=10)
+            missing.unlink()
+
+            data = MODULE.collect(root, 100, scan_mode="tracked")
+            rendered = MODULE.to_markdown(data)
+
+            self.assertEqual(data["file_count"], 1)
+            self.assertEqual(
+                data["scan_incomplete_reasons"],
+                ["git_enumerated_paths_missing_from_worktree"],
+            )
+            self.assertIn("Scan incomplete reasons", rendered)
+
+    def test_path_globs_define_a_deterministic_case_sensitive_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            for relative in (
+                "packages/api/app.py",
+                "packages/api/generated.py",
+                "packages/api/README.md",
+                "packages/web/app.py",
+            ):
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("content", encoding="utf-8")
+
+            data = MODULE.collect(
+                root,
+                100,
+                include_paths=["packages/api/*"],
+                exclude_paths=["packages/api/generated*"],
+                scope_id="api-package",
+            )
+
+            self.assertEqual(data["file_count"], 2)
+            self.assertEqual(data["languages_by_file_count"], {"Python": 1})
+            self.assertEqual(data["include_path_patterns"], ["packages/api/*"])
+            self.assertEqual(data["exclude_path_patterns"], ["packages/api/generated*"])
+            self.assertEqual(data["scope_id"], "api-package")
+            self.assertIn("Scope ID: `api-package`", MODULE.to_markdown(data))
+            self.assertFalse(MODULE.path_selected("packages/API/upper.py", ["packages/api/*"], []))
+
+    def test_rejects_unsafe_path_globs_and_git_mode_outside_git(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.assertEqual(MODULE.normalize_path_patterns(["./packages/*"]), ["packages/*"])
+            for pattern in (
+                "", "/absolute/*", "C:/absolute/*", "../secret/*", "windows\\path\\*",
+                "./C:/absolute/*", ".//absolute/*", "./../secret/*",
+            ):
+                with self.subTest(pattern=pattern):
+                    with self.assertRaises(MODULE.CollectionError):
+                        MODULE.collect(root, 100, include_paths=[pattern])
+            with self.assertRaises(MODULE.CollectionError):
+                MODULE.collect(root, 100, scope_id="   ")
+            with self.assertRaises(MODULE.CollectionError):
+                MODULE.collect(root, 100, scan_mode="tracked")
+
+            result = subprocess.run(
+                [sys.executable, str(MODULE_PATH), str(root), "--scan-mode", "tracked"],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("requires a Git working tree", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+
     def test_markdown_escapes_untrusted_paths(self) -> None:
         data = MODULE.collect(Path(__file__).parent, 100)
         data["root"] = "repo`\n\n## Forged result\u2028still forged"
+        data["scope_id"] = "scope`\n## Forged scope"
+        data["include_path_patterns"] = ["src/*`\n## Forged include"]
+        data["exclude_path_patterns"] = ["dist/*`\n## Forged exclude"]
+        data["scan_incomplete_reasons"] = ["missing`\n## Forged reason"]
+        data["git"]["branch"] = "main`\n## Forged branch"
         data["sensitive_looking_files"] = [{"path": "secret`\n- fake.md", "tracked": True}]
 
         rendered = MODULE.to_markdown(data)
 
         self.assertNotIn("\n## Forged result", rendered)
+        self.assertNotIn("\n## Forged scope", rendered)
+        self.assertNotIn("\n## Forged include", rendered)
+        self.assertNotIn("\n## Forged exclude", rendered)
+        self.assertNotIn("\n## Forged reason", rendered)
+        self.assertNotIn("\n## Forged branch", rendered)
         self.assertNotIn("\n- fake.md", rendered)
         self.assertNotIn("\u2028", rendered)
         self.assertIn("Forged result", rendered)
+
+    def test_surrogate_git_paths_are_lossless_internally_and_safe_to_render(self) -> None:
+        raw_path = b"test_invalid_\xff.py"
+        decoded = MODULE.decode_git_path(raw_path)
+
+        self.assertEqual(decoded.encode(sys.getfilesystemencoding(), "surrogateescape"), raw_path)
+        data = MODULE.collect(Path(__file__).parent, 100)
+        data["root"] = decoded
+        data["test_file_examples"] = [decoded]
+        json_output = MODULE.to_json(data)
+        markdown_output = MODULE.to_markdown(data)
+
+        self.assertEqual(json.loads(json_output)["root"], decoded)
+        self.assertNotIn("\udcff", json_output)
+        self.assertNotIn("\udcff", markdown_output)
+        self.assertIn("\\udcff", json_output)
+        self.assertIn("\ufffd", markdown_output)
+        json_output.encode("utf-8")
+        markdown_output.encode("utf-8")
+
+    @unittest.skipUnless(os.name == "posix" and shutil.which("git"), "raw byte paths require POSIX and Git")
+    def test_tracked_scan_round_trips_a_non_utf8_filesystem_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            raw_root = os.fsencode(root)
+            raw_name = b"test_invalid_\xff.py"
+            subprocess.run([b"git", b"-C", raw_root, b"init", b"-q"], check=True, timeout=10)
+            descriptor = os.open(os.path.join(raw_root, raw_name), os.O_WRONLY | os.O_CREAT, 0o600)
+            try:
+                os.write(descriptor, b"print('ok')\n")
+            finally:
+                os.close(descriptor)
+            subprocess.run([b"git", b"-C", raw_root, b"add", b"--", raw_name], check=True, timeout=10)
+
+            data = MODULE.collect(root, 100, scan_mode="tracked")
+            expected = os.fsdecode(raw_name)
+
+            self.assertEqual(data["test_file_examples"], [expected])
+            self.assertEqual(json.loads(MODULE.to_json(data))["test_file_examples"], [expected])
+            MODULE.to_markdown(data).encode("utf-8")
 
     def test_cli_rejects_non_finite_large_file_threshold(self) -> None:
         result = subprocess.run(
@@ -227,6 +478,23 @@ class CollectRepoSignalsTests(unittest.TestCase):
         self.assertEqual(huge.returncode, 2)
         self.assertIn("too large", huge.stderr)
         self.assertNotIn("Traceback", huge.stderr)
+
+    def test_cli_reports_stdout_encoding_failure_without_traceback(self) -> None:
+        environment = os.environ.copy()
+        environment["PYTHONIOENCODING"] = "ascii"
+        result = subprocess.run(
+            [sys.executable, str(MODULE_PATH), ".", "--format", "markdown", "--scope-id", "中文"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+            env=environment,
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("could not write output", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
 
 
 if __name__ == "__main__":

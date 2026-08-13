@@ -17,7 +17,7 @@ An evidence-backed, read-only repository health audit Skill for Codex, with stan
 - Flag high-confidence attention items such as newly detected sensitive filenames, lost CI or tests, and new large files.
 - Keep secret values private: filename checks never read or print sensitive file contents.
 - Preserve complete large-file inventories in JSON while keeping Markdown reports bounded and readable.
-- Support custom directory exclusions, recorded file limits, and large-file thresholds.
+- Support Git-aware scan modes, monorepo path scopes, custom exclusions, recorded file limits, and large-file thresholds.
 
 The collector produces inventory signals, not automatic findings. The Skill tells Codex to verify context and evidence before assigning impact or priority.
 
@@ -76,25 +76,55 @@ Save a reusable JSON snapshot:
 python scripts/collect_repo_signals.py /path/to/repo --format json --output before.json
 ```
 
+When using `filesystem`, keep reusable snapshots outside the target repository so an earlier output does not become input to the next scan.
+
+Choose a scan mode for the intended workflow:
+
+```bash
+# Default: reachable filesystem files, including ignored and untracked files
+python scripts/collect_repo_signals.py /path/to/repo --scan-mode filesystem
+
+# Tracked files plus non-ignored untracked files
+python scripts/collect_repo_signals.py /path/to/repo --scan-mode git-visible
+
+# Stable CI baseline containing tracked files that are present in the worktree
+python scripts/collect_repo_signals.py /path/to/repo --scan-mode tracked --scope-id whole-repository
+```
+
+Scope a monorepo with repeatable, case-sensitive, root-relative POSIX globs:
+
+```bash
+python scripts/collect_repo_signals.py /path/to/repo \
+  --scan-mode tracked \
+  --include-path "packages/api/*" \
+  --exclude-path "packages/api/generated/*" \
+  --scope-id api-package \
+  --format json --output api.json
+```
+
+Every mode keeps the collector's built-in directory exclusions and skips symlinks. Path globs use Python `fnmatchcase` semantics against the full relative path; `*` can match `/`, and exclusions win over inclusions. `tracked` omits every untracked file, whether ignored or not, but still includes tracked files that later match an ignore rule. Use `filesystem` when discovering accidentally created sensitive files is the priority.
+
+`git-visible` follows the checkout's effective Git ignore configuration, including repository-local and global excludes. Use the same ignore configuration for repeat comparisons. Git metadata such as worktree state describes the Git checkout and can be broader than a path-glob scope. If Git enumerates a tracked file that is absent from the worktree—for example in a sparse checkout—the snapshot records an incomplete scan and the comparer will not treat it as directly comparable.
+
 Compare two snapshots:
 
 ```bash
 python scripts/compare_repo_signals.py before.json after.json --format markdown
 ```
 
-Use snapshot comparison in automation:
+Use snapshot comparison in automation, failing both on high-confidence attention items and on an incomparable baseline:
 
 ```bash
-python scripts/compare_repo_signals.py before.json after.json --fail-on-attention
+python scripts/compare_repo_signals.py before.json after.json --fail-on-attention --require-comparable
 ```
 
 Comparison exit codes:
 
-- `0`: comparison completed without attention items
-- `1`: attention items found when `--fail-on-attention` is enabled
+- `0`: comparison completed and no enabled policy gate failed; without gate flags, attention and limitations remain report-only
+- `1`: a requested policy gate failed: attention items with `--fail-on-attention`, or comparison limits with `--require-comparable`
 - `2`: invalid input or execution error
 
-New JSON snapshots record the configured file limit and retain every large file found within the scanned scope. Markdown output displays at most 20 items per long change list and points to JSON for the complete data. When an older snapshot may contain only the legacy top-20 large-file list, the comparer reports a limitation and suppresses unreliable large-file addition/removal alerts.
+New JSON snapshots record their mode, logical path scope, configured file limit, scan completeness, and every large file found within the scanned scope. Markdown output displays at most 20 items per long change list and points to JSON for the complete data. A stable non-empty `--scope-id` lets equivalent checkouts at different absolute roots compare safely. When an older snapshot may contain only the legacy top-20 large-file list, the comparer reports a limitation and suppresses unreliable large-file addition/removal alerts.
 
 Run `python scripts/collect_repo_signals.py --help` or `python scripts/compare_repo_signals.py --help` for all options.
 
@@ -117,6 +147,7 @@ See [SKILL.md](SKILL.md) for the agent workflow, [audit rubric](references/rubri
 - [Releases](https://github.com/1838904818/audit-repo/releases) for versioned, checksummed Skill archives
 - [Changelog](CHANGELOG.md) for version-by-version behavior and compatibility notes
 - [Contributing guide](https://github.com/1838904818/audit-repo/blob/main/CONTRIBUTING.md) for local validation and change expectations
+- [Code of conduct](https://github.com/1838904818/audit-repo/blob/main/CODE_OF_CONDUCT.md) for community participation expectations
 - [Security policy](https://github.com/1838904818/audit-repo/security/policy) for private vulnerability reporting
 
 ## 中文快速开始
