@@ -1,6 +1,7 @@
 # audit-repo
 
 [![CI](https://github.com/1838904818/audit-repo/actions/workflows/ci.yml/badge.svg)](https://github.com/1838904818/audit-repo/actions/workflows/ci.yml)
+[![Release](https://github.com/1838904818/audit-repo/actions/workflows/release.yml/badge.svg)](https://github.com/1838904818/audit-repo/actions/workflows/release.yml)
 [![Latest release](https://img.shields.io/github/v/release/1838904818/audit-repo)](https://github.com/1838904818/audit-repo/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -26,6 +27,8 @@ The easiest option in Codex is to ask the built-in installer to install this rep
 ```text
 Use $skill-installer to install https://github.com/1838904818/audit-repo.
 ```
+
+For an offline or version-pinned installation, download the `.zip` and matching `.sha256` file from the [latest release](https://github.com/1838904818/audit-repo/releases/latest). Verify the checksum, then extract the archive's top-level `audit-repo` directory into `$HOME/.agents/skills`. Release assets are built only after the full test matrix passes on Windows and Linux with Python 3.10 and 3.13.
 
 For a manual user-wide installation, clone the repository into the official local skills directory. See the [OpenAI Build skills documentation](https://learn.chatgpt.com/docs/build-skills) for current locations and invocation methods.
 
@@ -105,6 +108,13 @@ Run `python scripts/collect_repo_signals.py --help` or `python scripts/compare_r
 
 See [SKILL.md](SKILL.md) for the agent workflow, [audit rubric](references/rubric.md) for priorities, and [check selection](references/check-selection.md) for safe project-native commands.
 
+## Project resources
+
+- [Wiki](https://github.com/1838904818/audit-repo/wiki) for task-oriented guides and CLI details
+- [Releases](https://github.com/1838904818/audit-repo/releases) for versioned, checksummed Skill archives
+- [Contributing guide](https://github.com/1838904818/audit-repo/blob/main/CONTRIBUTING.md) for local validation and change expectations
+- [Security policy](https://github.com/1838904818/audit-repo/security/policy) for private vulnerability reporting
+
 ## 中文快速开始
 
 安装后，在 Codex 新任务中输入：
@@ -138,7 +148,13 @@ python /path/to/skill-creator/scripts/quick_validate.py .
 python -m unittest discover -s scripts -p "test_*.py"
 ```
 
-CI also exercises Markdown output, JSON output, and snapshot comparison on every push.
+Build the same deterministic assets used by GitHub Releases:
+
+```bash
+python scripts/package_skill.py --version v1.2.3 --output-dir dist
+```
+
+CI exercises Markdown output, JSON output, snapshot comparison, repository contracts, and deterministic packaging on every push. Release tags additionally run the full cross-platform matrix before publishing assets.
 
 ## License
 

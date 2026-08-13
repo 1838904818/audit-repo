@@ -1,4 +1,6 @@
 __pycache__/
 *.py[cod]
+dist/
+repo-signals.json
 .DS_Store
 Thumbs.db

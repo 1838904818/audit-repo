@@ -49,8 +49,34 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertNotIn(".codex\\skills", readme)
 
     def test_required_public_files_exist(self) -> None:
-        for relative in ("README.md", "SKILL.md", "LICENSE", "agents/openai.yaml"):
+        for relative in (
+            "README.md",
+            "SKILL.md",
+            "LICENSE",
+            ".gitattributes",
+            "CONTRIBUTING.md",
+            "SECURITY.md",
+            "agents/openai.yaml",
+            ".github/CODEOWNERS",
+            ".github/workflows/ci.yml",
+            ".github/workflows/release.yml",
+        ):
             self.assertTrue((ROOT / relative).is_file(), f"missing required file: {relative}")
+
+    def test_readme_contains_valid_chinese_quick_start(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("中文快速开始", readme)
+        self.assertIn("使用 $audit-repo 审查当前仓库", readme)
+        for mojibake_marker in ("涓枃", "锛", "€"):
+            self.assertNotIn(mojibake_marker, readme)
+
+    def test_actions_are_pinned_to_commit_shas(self) -> None:
+        for relative in (".github/workflows/ci.yml", ".github/workflows/release.yml"):
+            workflow = (ROOT / relative).read_text(encoding="utf-8")
+            action_refs = re.findall(r"(?m)^\s*- uses:\s+([^\s#]+)", workflow)
+            self.assertTrue(action_refs, f"no action references found in {relative}")
+            for action_ref in action_refs:
+                self.assertRegex(action_ref, r"^[^@]+@[0-9a-f]{40}$")
 
 
 if __name__ == "__main__":
