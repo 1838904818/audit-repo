@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any, Iterable
 
 
 SUPPORTED_SCHEMA_VERSIONS = {1}
+LARGE_GROWTH_MIN_BYTES = 5 * 1024 * 1024
 SET_FIELDS = {
     "manifests": "Manifests",
     "lockfiles": "Lockfiles",
@@ -29,18 +31,83 @@ class SnapshotError(ValueError):
     """Raised when a snapshot cannot be compared safely."""
 
 
+def reject_json_constant(value: str) -> None:
+    raise SnapshotError(f"non-finite JSON number is not supported: {value}")
+
+
+def validate_snapshot(raw: dict[str, Any], path: Path) -> None:
+    version = raw.get("schema_version", 1)
+    if not isinstance(version, int) or isinstance(version, bool) or version not in SUPPORTED_SCHEMA_VERSIONS:
+        raise SnapshotError(f"unsupported schema_version {version!r} in {path}")
+
+    list_fields = set(SET_FIELDS) | {
+        "excluded_directory_names", "large_files", "sensitive_looking_files",
+    }
+    for field in list_fields:
+        if field in raw and not isinstance(raw[field], list):
+            raise SnapshotError(f"field {field!r} must be a list in {path}")
+    for field in set(SET_FIELDS) | {"excluded_directory_names"}:
+        if any(not isinstance(item, str) for item in raw.get(field, [])):
+            raise SnapshotError(f"field {field!r} must contain only strings in {path}")
+    for field in ("file_count", "test_file_count", "large_file_threshold_bytes"):
+        value = raw.get(field)
+        if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 0):
+            raise SnapshotError(f"field {field!r} must be a non-negative integer in {path}")
+    if "scan_truncated" in raw and not isinstance(raw["scan_truncated"], bool):
+        raise SnapshotError(f"field 'scan_truncated' must be a boolean in {path}")
+    if "root" in raw and raw["root"] is not None and not isinstance(raw["root"], str):
+        raise SnapshotError(f"field 'root' must be a string or null in {path}")
+
+    markers = raw.get("work_markers", {})
+    if not isinstance(markers, dict) or any(
+        not isinstance(key, str)
+        or not isinstance(value, int)
+        or isinstance(value, bool)
+        or value < 0
+        for key, value in markers.items()
+    ):
+        raise SnapshotError(f"field 'work_markers' must map strings to non-negative integers in {path}")
+
+    automation = raw.get("automation", {})
+    if not isinstance(automation, dict):
+        raise SnapshotError(f"field 'automation' must be an object in {path}")
+    if "configured_tools" in automation and (
+        not isinstance(automation["configured_tools"], list)
+        or any(not isinstance(item, str) for item in automation["configured_tools"])
+    ):
+        raise SnapshotError(f"field 'automation.configured_tools' must be a list of strings in {path}")
+
+    for item in raw.get("large_files", []):
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("path"), str)
+            or not isinstance(item.get("bytes"), int)
+            or isinstance(item.get("bytes"), bool)
+            or item["bytes"] < 0
+        ):
+            raise SnapshotError(f"each 'large_files' item needs a string path and non-negative integer bytes in {path}")
+    for item in raw.get("sensitive_looking_files", []):
+        tracked = item.get("tracked") if isinstance(item, dict) else None
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("path"), str)
+            or (tracked is not None and not isinstance(tracked, bool))
+        ):
+            raise SnapshotError(f"each 'sensitive_looking_files' item needs a string path and boolean/null tracked value in {path}")
+
+
 def load_snapshot(path: Path) -> dict[str, Any]:
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw = json.loads(path.read_text(encoding="utf-8"), parse_constant=reject_json_constant)
     except OSError as error:
         raise SnapshotError(f"could not read {path}: {error}") from error
-    except json.JSONDecodeError as error:
+    except SnapshotError:
+        raise
+    except ValueError as error:
         raise SnapshotError(f"invalid JSON in {path}: {error}") from error
     if not isinstance(raw, dict):
         raise SnapshotError(f"snapshot must be a JSON object: {path}")
-    version = raw.get("schema_version", 1)
-    if version not in SUPPORTED_SCHEMA_VERSIONS:
-        raise SnapshotError(f"unsupported schema_version {version!r} in {path}")
+    validate_snapshot(raw, path)
     return raw
 
 
@@ -73,6 +140,20 @@ def sensitive_map(data: dict[str, Any]) -> dict[str, bool | None]:
             continue
         tracked = item.get("tracked")
         result[item["path"]] = tracked if isinstance(tracked, bool) else None
+    return result
+
+
+def large_file_map(data: dict[str, Any]) -> dict[str, int]:
+    result: dict[str, int] = {}
+    value = data.get("large_files", [])
+    if not isinstance(value, list):
+        return result
+    for item in value:
+        if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+            continue
+        size = item.get("bytes")
+        if isinstance(size, int) and not isinstance(size, bool) and size >= 0:
+            result[item["path"]] = size
     return result
 
 
@@ -154,23 +235,50 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
         tracking = "tracked" if status is True else ("untracked" if status is False else "tracking unknown")
         attention.append({
             "code": "sensitive-filename-added",
-            "message": f"Sensitive-looking filename added: `{path}` ({tracking}); verify that no secret is committed.",
+            "message": f"Sensitive-looking filename added: {markdown_code(path)} ({tracking}); verify that no secret is committed.",
         })
     for path in tracking_changed:
         if new_sensitive[path] is True:
             attention.append({
                 "code": "sensitive-file-now-tracked",
-                "message": f"Sensitive-looking file is now tracked: `{path}`; verify its contents without exposing values.",
+                "message": f"Sensitive-looking file is now tracked: {markdown_code(path)}; verify its contents without exposing values.",
             })
 
-    old_large = {str(item.get("path")) for item in before.get("large_files", []) if isinstance(item, dict) and item.get("path")}
-    new_large = {str(item.get("path")) for item in after.get("large_files", []) if isinstance(item, dict) and item.get("path")}
-    large_added = sorted(new_large - old_large)
-    large_removed = sorted(old_large - new_large)
-    if large_added or large_removed:
-        changes.append({"field": "large_files", "label": "Large files", "added": large_added, "removed": large_removed})
+    old_large = large_file_map(before)
+    new_large = large_file_map(after)
+    large_added = sorted(set(new_large) - set(old_large))
+    large_removed = sorted(set(old_large) - set(new_large))
+    large_resized = [
+        {
+            "path": path,
+            "before_bytes": old_large[path],
+            "after_bytes": new_large[path],
+            "delta_bytes": new_large[path] - old_large[path],
+        }
+        for path in sorted(set(old_large) & set(new_large))
+        if old_large[path] != new_large[path]
+    ]
+    if large_added or large_removed or large_resized:
+        changes.append({
+            "field": "large_files",
+            "label": "Large files",
+            "added": large_added,
+            "removed": large_removed,
+            "resized": large_resized,
+        })
     for path in large_added:
-        attention.append({"code": "large-file-added", "message": f"New large file detected: `{path}`; verify that it belongs in Git."})
+        attention.append({"code": "large-file-added", "message": f"New large file detected: {markdown_code(path)}; verify that it belongs in Git."})
+    for item in large_resized:
+        before_size = item["before_bytes"]
+        after_size = item["after_bytes"]
+        if item["delta_bytes"] >= LARGE_GROWTH_MIN_BYTES and after_size >= max(1, before_size) * 1.5:
+            attention.append({
+                "code": "large-file-grew-significantly",
+                "message": (
+                    f"Large file grew significantly: {markdown_code(item['path'])} "
+                    f"from {human_bytes(before_size)} to {human_bytes(after_size)}; verify that the growth is intentional."
+                ),
+            })
 
     loss_rules = (
         ("ci_files", "CI configuration disappeared"),
@@ -208,9 +316,30 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def markdown_code(value: object) -> str:
+    """Render untrusted data as a single safe Markdown code span."""
+    text = "".join(
+        " " if char.isspace() else char if ord(char) >= 32 and not 127 <= ord(char) <= 159 else "?"
+        for char in str(value)
+    )
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    fence = "`" * (longest + 1)
+    padding = " " if longest or text.startswith(" ") or text.endswith(" ") else ""
+    return f"{fence}{padding}{text}{padding}{fence}"
+
+
+def human_bytes(value: int) -> str:
+    amount = float(value)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if amount < 1024 or unit == "TiB":
+            return f"{amount:.0f} {unit}" if unit == "B" else f"{amount:.1f} {unit}"
+        amount /= 1024
+    return f"{value} B"
+
+
 def display_items(values: Iterable[str]) -> str:
     items = list(values)
-    return ", ".join(f"`{item}`" for item in items) if items else "none"
+    return ", ".join(markdown_code(item) for item in items) if items else "none"
 
 
 def render_change(change: dict[str, Any]) -> str:
@@ -225,6 +354,11 @@ def render_change(change: dict[str, Any]) -> str:
         parts.append(f"removed {display_items(change['removed'])}")
     if change.get("tracking_changed"):
         parts.append(f"tracking changed for {display_items(change['tracking_changed'])}")
+    if change.get("resized"):
+        parts.append("resized " + ", ".join(
+            f"{markdown_code(item['path'])} ({human_bytes(item['before_bytes'])} -> {human_bytes(item['after_bytes'])})"
+            for item in change["resized"]
+        ))
     return f"- **{change['label']}:** " + "; ".join(parts)
 
 
@@ -233,8 +367,8 @@ def to_markdown(result: dict[str, Any]) -> str:
     lines = [
         "# Repository signal comparison",
         "",
-        f"- Before: `{result['before_root'] or 'Unknown'}`",
-        f"- After: `{result['after_root'] or 'Unknown'}`",
+        f"- Before: {markdown_code(result['before_root'] or 'Unknown')}",
+        f"- After: {markdown_code(result['after_root'] or 'Unknown')}",
         f"- Changed dimensions: {summary['change_count']}",
         f"- Attention items: {summary['attention_count']}",
         f"- Directly comparable: {'yes' if summary['comparable'] else 'no'}",

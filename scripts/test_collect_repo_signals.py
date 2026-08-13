@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -32,6 +34,7 @@ class CollectRepoSignalsTests(unittest.TestCase):
             (root / ".env").write_text("SECRET=do-not-print", encoding="utf-8")
             (root / ".env.production").write_text("SECRET=also-private", encoding="utf-8")
             (root / ".env.example").write_text("SECRET=placeholder", encoding="utf-8")
+            (root / "credentials.json").write_text('{"note":"# TODO private"}', encoding="utf-8")
             (root / "Dockerfile").write_text("FROM scratch", encoding="utf-8")
             (root / "Makefile").write_text("test:\n\tpython -m unittest\n", encoding="utf-8")
             (root / "src").mkdir()
@@ -58,7 +61,7 @@ class CollectRepoSignalsTests(unittest.TestCase):
             self.assertNotIn("FIXME", data["work_markers"])
             self.assertEqual(
                 [item["path"] for item in data["sensitive_looking_files"]],
-                [".env", ".env.production"],
+                [".env", ".env.production", "credentials.json"],
             )
             self.assertEqual(data["environment_examples"], [".env.example"])
             self.assertEqual(data["automation"]["package_scripts"]["package.json"], ["lint", "test"])
@@ -82,6 +85,17 @@ class CollectRepoSignalsTests(unittest.TestCase):
             self.assertEqual(data["file_count"], 2)
             self.assertTrue(data["scan_truncated"])
 
+    def test_exact_scan_limit_is_not_reported_as_truncated(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            for index in range(2):
+                (root / f"file-{index}.txt").write_text("data", encoding="utf-8")
+
+            data = MODULE.collect(root, 2)
+
+            self.assertEqual(data["file_count"], 2)
+            self.assertFalse(data["scan_truncated"])
+
     def test_custom_directory_exclusion_and_large_file_threshold(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -95,6 +109,44 @@ class CollectRepoSignalsTests(unittest.TestCase):
             self.assertEqual(data["excluded_directory_names"], ["generated"])
             self.assertEqual(data["large_files"][0]["path"], "keep.py")
             self.assertEqual(data["work_markers"], {})
+
+    def test_markdown_escapes_untrusted_paths(self) -> None:
+        data = MODULE.collect(Path(__file__).parent, 100)
+        data["root"] = "repo`\n\n## Forged result\u2028still forged"
+        data["sensitive_looking_files"] = [{"path": "secret`\n- fake.md", "tracked": True}]
+
+        rendered = MODULE.to_markdown(data)
+
+        self.assertNotIn("\n## Forged result", rendered)
+        self.assertNotIn("\n- fake.md", rendered)
+        self.assertNotIn("\u2028", rendered)
+        self.assertIn("Forged result", rendered)
+
+    def test_cli_rejects_non_finite_large_file_threshold(self) -> None:
+        result = subprocess.run(
+            [sys.executable, str(MODULE_PATH), ".", "--large-file-mib", "nan"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("must be positive", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+        huge = subprocess.run(
+            [sys.executable, str(MODULE_PATH), ".", "--large-file-mib", "1e308"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(huge.returncode, 2)
+        self.assertIn("too large", huge.stderr)
+        self.assertNotIn("Traceback", huge.stderr)
 
 
 if __name__ == "__main__":

@@ -81,6 +81,18 @@ class CompareRepoSignalsTests(unittest.TestCase):
         self.assertEqual(len(result["limitations"]), 3)
         self.assertIn("scan-truncated", {item["code"] for item in result["attention"]})
 
+    def test_reports_significant_growth_of_existing_large_file(self) -> None:
+        before = snapshot(large_files=[{"path": "model.bin", "bytes": 6_000_000}])
+        after = snapshot(large_files=[{"path": "model.bin", "bytes": 6_000_000_000}])
+
+        result = MODULE.compare(before, after)
+        codes = {item["code"] for item in result["attention"]}
+        change = next(item for item in result["changes"] if item["field"] == "large_files")
+
+        self.assertIn("large-file-grew-significantly", codes)
+        self.assertEqual(change["resized"][0]["path"], "model.bin")
+        self.assertIn("5.6 GiB", MODULE.to_markdown(result))
+
     def test_loads_legacy_snapshot_and_rejects_unknown_schema(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "snapshot.json"
@@ -113,6 +125,58 @@ class CompareRepoSignalsTests(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertIn("Sensitive-looking filename added", result.stdout)
             self.assertEqual(result.stderr, "")
+
+    def test_cli_rejects_malformed_snapshot_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            before_path = Path(temp_dir) / "before.json"
+            after_path = Path(temp_dir) / "after.json"
+            before_path.write_text(json.dumps(snapshot(large_files=None)), encoding="utf-8")
+            after_path.write_text(json.dumps(snapshot()), encoding="utf-8")
+
+            result = subprocess.run(
+                [sys.executable, str(MODULE_PATH), str(before_path), str(after_path)],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=10,
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("must be a list", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+
+    def test_cli_rejects_non_finite_json_number(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            before_path = Path(temp_dir) / "before.json"
+            after_path = Path(temp_dir) / "after.json"
+            before_path.write_text('{"schema_version":1,"file_count":NaN}', encoding="utf-8")
+            after_path.write_text(json.dumps(snapshot()), encoding="utf-8")
+
+            result = subprocess.run(
+                [sys.executable, str(MODULE_PATH), str(before_path), str(after_path)],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=10,
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("non-finite JSON number", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+
+    def test_markdown_escapes_untrusted_snapshot_fields(self) -> None:
+        before = snapshot(root="repo`\n\n## Forged result")
+        after = snapshot(
+            root="after",
+            sensitive_looking_files=[{"path": ".env`\n- forged", "tracked": True}],
+        )
+
+        rendered = MODULE.to_markdown(MODULE.compare(before, after))
+
+        self.assertNotIn("\n## Forged result", rendered)
+        self.assertNotIn("\n- forged", rendered)
 
 
 if __name__ == "__main__":

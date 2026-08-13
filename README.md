@@ -21,28 +21,38 @@ The collector produces inventory signals, not automatic findings. The Skill tell
 
 ## Install as a Codex Skill
 
-Clone the repository into the Codex skills directory.
+The easiest option in Codex is to ask the built-in installer to install this repository:
+
+```text
+Use $skill-installer to install https://github.com/1838904818/audit-repo.
+```
+
+For a manual user-wide installation, clone the repository into the official local skills directory. See the [OpenAI Build skills documentation](https://learn.chatgpt.com/docs/build-skills) for current locations and invocation methods.
 
 macOS or Linux:
 
 ```bash
-mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
-git clone https://github.com/1838904818/audit-repo.git "${CODEX_HOME:-$HOME/.codex}/skills/audit-repo"
+mkdir -p "$HOME/.agents/skills"
+git clone https://github.com/1838904818/audit-repo.git "$HOME/.agents/skills/audit-repo"
 ```
 
 Windows PowerShell:
 
 ```powershell
-$skillRoot = if ($env:CODEX_HOME) { Join-Path $env:CODEX_HOME "skills" } else { Join-Path $HOME ".codex\skills" }
+$skillRoot = Join-Path $HOME ".agents\skills"
 New-Item -ItemType Directory -Force -Path $skillRoot | Out-Null
 git clone https://github.com/1838904818/audit-repo.git (Join-Path $skillRoot "audit-repo")
 ```
 
-Start a new Codex task and invoke the Skill explicitly:
+Codex detects installed skill changes automatically. If the Skill does not appear, restart Codex.
+
+Invoke it explicitly in Codex CLI or the IDE extension with `/skills` or `$audit-repo`:
 
 ```text
 Use $audit-repo to audit this repository and prioritize the most important fixes.
 ```
+
+In the ChatGPT desktop app, type `@` and choose **Audit Repo** from the skill picker.
 
 Codex can also invoke it automatically for repository health, release readiness, maintainability, security posture, technical debt, and audit comparison requests.
 

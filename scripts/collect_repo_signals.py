@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import subprocess
@@ -91,9 +92,8 @@ def walk_files(root: Path, max_files: int, exclude_dirs: Iterable[str] = ()) -> 
             if path.is_symlink() or not path.is_file():
                 continue
             files.append(path)
-            if len(files) >= max_files:
-                truncated = True
-                return files, truncated
+            if len(files) > max_files:
+                return files[:max_files], True
     return files, truncated
 
 
@@ -261,7 +261,8 @@ def collect(
         if suffix in LANGUAGE_BY_SUFFIX:
             languages[LANGUAGE_BY_SUFFIX[suffix]] += 1
         test_file = is_test(rel)
-        if not test_file:
+        sensitive_file = is_sensitive_filename(path.name)
+        if not test_file and not sensitive_file:
             markers.update(contains_marker(path))
         try:
             size = path.stat().st_size
@@ -269,7 +270,7 @@ def collect(
             size = 0
         if size >= large_file_bytes:
             large_files.append({"path": rel, "bytes": size})
-        if is_sensitive_filename(path.name):
+        if sensitive_file:
             sensitive.append({
                 "path": rel,
                 "tracked": None if tracked is None else rel in tracked,
@@ -333,15 +334,30 @@ def path_name(rel: str) -> str:
     return rel.rsplit("/", 1)[-1].lower()
 
 
+def markdown_code(value: object) -> str:
+    """Render untrusted data as a single safe Markdown code span."""
+    text = "".join(
+        " " if char.isspace() else char if ord(char) >= 32 and not 127 <= ord(char) <= 159 else "?"
+        for char in str(value)
+    )
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    fence = "`" * (longest + 1)
+    padding = " " if longest or text.startswith(" ") or text.endswith(" ") else ""
+    return f"{fence}{padding}{text}{padding}{fence}"
+
+
 def display_list(values: Iterable[str]) -> str:
     items = list(values)
-    return ", ".join(f"`{item}`" for item in items) if items else "None found"
+    return ", ".join(markdown_code(item) for item in items) if items else "None found"
 
 
 def display_mapping(values: dict[str, list[str]]) -> str:
     if not values:
         return "None found"
-    return "; ".join(f"`{path}`: {', '.join(items) or '(none)'}" for path, items in values.items())
+    return "; ".join(
+        f"{markdown_code(path)}: {', '.join(markdown_code(item) for item in items) or '(none)'}"
+        for path, items in values.items()
+    )
 
 
 def to_markdown(data: dict[str, Any]) -> str:
@@ -352,7 +368,7 @@ def to_markdown(data: dict[str, Any]) -> str:
     lines = [
         "# Repository signals",
         "",
-        f"- Root: `{data['root']}`",
+        f"- Root: {markdown_code(data['root'])}",
         f"- Files scanned: {data['file_count']}" + (" (limit reached)" if data["scan_truncated"] else ""),
         f"- Git repository: {'yes' if git['repository'] else 'no'}",
         f"- Git branch: {git['branch'] or 'Unknown'}",
@@ -396,7 +412,7 @@ def to_markdown(data: dict[str, Any]) -> str:
     ]
     if data["large_files"]:
         lines.append(f"- Large files (>={threshold_mib:g} MiB): " + ", ".join(
-            f"`{item['path']}` ({item['bytes'] / 1_048_576:.1f} MiB)" for item in data["large_files"]
+            f"{markdown_code(item['path'])} ({item['bytes'] / 1_048_576:.1f} MiB)" for item in data["large_files"]
         ))
     else:
         lines.append(f"- Large files (>={threshold_mib:g} MiB): None found")
@@ -404,7 +420,7 @@ def to_markdown(data: dict[str, Any]) -> str:
         rendered = []
         for item in data["sensitive_looking_files"]:
             status = "tracking unknown" if item["tracked"] is None else ("tracked" if item["tracked"] else "untracked")
-            rendered.append(f"`{item['path']}` ({status})")
+            rendered.append(f"{markdown_code(item['path'])} ({status})")
         lines.append("- Sensitive-looking filenames (contents not read): " + ", ".join(rendered))
     else:
         lines.append("- Sensitive-looking filenames: None found")
@@ -438,14 +454,18 @@ def main() -> int:
     if args.max_files < 1:
         print("error: --max-files must be positive", file=sys.stderr)
         return 2
-    if args.large_file_mib <= 0:
+    if not math.isfinite(args.large_file_mib) or args.large_file_mib <= 0:
         print("error: --large-file-mib must be positive", file=sys.stderr)
+        return 2
+    threshold_bytes = args.large_file_mib * 1_048_576
+    if not math.isfinite(threshold_bytes):
+        print("error: --large-file-mib is too large", file=sys.stderr)
         return 2
     data = collect(
         root,
         args.max_files,
         exclude_dirs=args.exclude_dir,
-        large_file_bytes=max(1, int(args.large_file_mib * 1_048_576)),
+        large_file_bytes=max(1, int(threshold_bytes)),
     )
     output = json.dumps(data, indent=2, ensure_ascii=False) + "\n" if args.format == "json" else to_markdown(data)
     if args.output:
