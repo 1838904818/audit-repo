@@ -18,6 +18,7 @@ FIXED_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 RUNTIME_FILES = (
     Path("SKILL.md"),
     Path("README.md"),
+    Path("CHANGELOG.md"),
     Path("LICENSE"),
     Path("agents/openai.yaml"),
     Path("references/check-selection.md"),
@@ -39,7 +40,7 @@ def normalize_version(version: str) -> str:
 
 def archive_bytes(path: Path) -> bytes:
     try:
-        return path.read_bytes()
+        return path.read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
     except OSError as error:
         raise PackageError(f"could not read required file {path}: {error}") from error
 
@@ -57,10 +58,10 @@ def build_archive(version: str, output_dir: Path) -> tuple[Path, Path, str]:
     archive = output_dir / f"audit-repo-{normalized}.zip"
     checksum = archive.with_suffix(archive.suffix + ".sha256")
     try:
-        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as bundle:
+        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_STORED) as bundle:
             for relative in RUNTIME_FILES:
                 info = zipfile.ZipInfo(f"{ARCHIVE_ROOT}/{relative.as_posix()}", FIXED_TIMESTAMP)
-                info.compress_type = zipfile.ZIP_DEFLATED
+                info.compress_type = zipfile.ZIP_STORED
                 info.create_system = 3
                 info.external_attr = (0o644 & 0xFFFF) << 16
                 bundle.writestr(info, archive_bytes(ROOT / relative))

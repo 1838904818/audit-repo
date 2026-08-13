@@ -24,7 +24,7 @@ Run the bundled collector from the skill directory:
 python scripts/collect_repo_signals.py /path/to/repo --format markdown
 ```
 
-Use `--format json` when structured output will make further analysis easier. The collector also surfaces Git state, declared project scripts, configured tools, dependency-update files, ownership, containers, and CI action references. It ignores common dependency/build directories, does not follow symlinks, and checks only filenames, not contents, for sensitive-looking files.
+Use `--format json` when structured output will make further analysis easier. JSON snapshots record the scan file limit and retain the complete large-file inventory; Markdown keeps long lists bounded. The collector also surfaces Git state, declared project scripts, configured tools, dependency-update files, ownership, containers, and CI action references. It ignores common dependency/build directories, does not follow symlinks, and checks only paths and Git tracking state, not contents, for sensitive-looking files.
 
 Use repeatable `--exclude-dir NAME` options for repository-specific generated folders. Adjust large-file review with `--large-file-mib MIB`; do not lower it so far that ordinary source files create noise.
 
@@ -38,7 +38,7 @@ python scripts/collect_repo_signals.py /path/to/repo --format json --output afte
 python scripts/compare_repo_signals.py before.json after.json --format markdown
 ```
 
-Use `--fail-on-attention` only in automation where exit code `1` should flag high-confidence attention items. Exit code `2` means invalid input or an execution error. Compare snapshots made with the same exclusions, file limit, and large-file threshold; treat reported changes as leads to verify, not findings.
+Use `--fail-on-attention` only in automation where exit code `1` should flag high-confidence attention items. Exit code `2` means invalid input or an execution error. Compare snapshots made with the same scope, exclusions, file limit, and large-file threshold. The comparer marks recorded configuration mismatches and incomplete legacy top-20 large-file inventories as limitations; treat reported changes as leads to verify, not findings.
 
 ### 3. Understand the project before judging it
 

@@ -16,6 +16,7 @@ SPEC = importlib.util.spec_from_file_location("package_skill", MODULE_PATH)
 assert SPEC and SPEC.loader
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+ORIGINAL_ROOT = MODULE.ROOT
 
 
 class PackageSkillTests(unittest.TestCase):
@@ -34,8 +35,39 @@ class PackageSkillTests(unittest.TestCase):
                 expected = [f"audit-repo/{path.as_posix()}" for path in MODULE.RUNTIME_FILES]
                 self.assertEqual(names, expected)
                 self.assertTrue(all(info.date_time == MODULE.FIXED_TIMESTAMP for info in bundle.infolist()))
+                self.assertTrue(all(info.compress_type == zipfile.ZIP_STORED for info in bundle.infolist()))
+                self.assertTrue(all((info.external_attr >> 16) & 0o777 == 0o644 for info in bundle.infolist()))
                 self.assertNotIn("audit-repo/.github/workflows/ci.yml", names)
                 self.assertFalse(any("test_" in name or "__pycache__" in name for name in names))
+
+    def test_normalizes_text_line_endings(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "example.txt"
+            path.write_bytes(b"first\r\nsecond\rthird\n")
+
+            self.assertEqual(MODULE.archive_bytes(path), b"first\nsecond\nthird\n")
+
+    def test_archive_is_independent_of_checkout_line_endings(self) -> None:
+        with tempfile.TemporaryDirectory() as lf_dir, tempfile.TemporaryDirectory() as crlf_dir, tempfile.TemporaryDirectory() as output_dir:
+            lf_root = Path(lf_dir)
+            crlf_root = Path(crlf_dir)
+            for relative in MODULE.RUNTIME_FILES:
+                canonical = (ORIGINAL_ROOT / relative).read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+                for root, data in ((lf_root, canonical), (crlf_root, canonical.replace(b"\n", b"\r\n"))):
+                    destination = root / relative
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.write_bytes(data)
+
+            try:
+                MODULE.ROOT = lf_root
+                lf_archive, _, lf_digest = MODULE.build_archive("v1.2.0", Path(output_dir) / "lf")
+                MODULE.ROOT = crlf_root
+                crlf_archive, _, crlf_digest = MODULE.build_archive("v1.2.0", Path(output_dir) / "crlf")
+            finally:
+                MODULE.ROOT = ORIGINAL_ROOT
+
+            self.assertEqual(lf_digest, crlf_digest)
+            self.assertEqual(lf_archive.read_bytes(), crlf_archive.read_bytes())
 
     def test_rejects_invalid_version(self) -> None:
         with self.assertRaises(MODULE.PackageError):

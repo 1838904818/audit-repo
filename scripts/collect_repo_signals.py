@@ -49,11 +49,30 @@ TEXT_SUFFIXES = set(LANGUAGE_BY_SUFFIX) | {
     ".rst", ".toml", ".txt", ".xml", ".yaml", ".yml",
 }
 SENSITIVE_NAMES = {
-    ".env", ".netrc", ".npmrc", ".pypirc", "credentials.json", "id_dsa",
-    "id_ecdsa", "id_ed25519", "id_rsa", "secrets.json", "service-account.json",
+    ".env", ".envrc", ".netrc", ".npmrc", ".pypirc", "application_default_credentials.json",
+    "auth.json", "client-secret.json", "client-secrets.json", "client_secret.json",
+    "client_secrets.json", "credentials", "credentials.ini", "credentials.json",
+    "credentials.toml", "credentials.yaml", "credentials.yml", "id_dsa",
+    "id_ecdsa", "id_ed25519", "id_rsa", "secrets.json", "secrets.yaml",
+    "secrets.yml", "service-account-key.json", "service-account.json",
+    "service_account.json", "service_account_key.json",
 }
-SENSITIVE_SUFFIXES = {".key", ".p12", ".pfx", ".pem"}
+SENSITIVE_SUFFIXES = {".jks", ".kdbx", ".key", ".keystore", ".p12", ".p8", ".pfx", ".pem", ".tfstate"}
+SENSITIVE_PATHS = {
+    ".aws/credentials",
+    ".cargo/credentials",
+    ".cargo/credentials.toml",
+    ".config/gcloud/application_default_credentials.json",
+    ".config/gcloud/credentials.db",
+    ".config/gh/hosts.yaml",
+    ".config/gh/hosts.yml",
+    ".config/glab-cli/config.yml",
+    ".docker/config.json",
+    ".kube/config",
+    ".terraform.d/credentials.tfrc.json",
+}
 ENV_EXAMPLE_NAMES = {".env.dist", ".env.example", ".env.sample", ".env.template", "example.env"}
+ENV_EXAMPLE_SUFFIXES = (".dist", ".example", ".sample", ".template")
 CI_ROOT_FILES = {"azure-pipelines.yml", "bitbucket-pipelines.yml", "jenkinsfile", ".gitlab-ci.yml"}
 DEPENDENCY_UPDATE_PATHS = {
     ".github/dependabot.yaml", ".github/dependabot.yml", ".renovaterc",
@@ -173,14 +192,24 @@ def is_test(path_text: str) -> bool:
     )
 
 
-def is_sensitive_filename(name: str) -> bool:
+def is_environment_example_name(name: str) -> bool:
     lowered = name.lower()
-    if lowered in ENV_EXAMPLE_NAMES:
+    return lowered in ENV_EXAMPLE_NAMES or (
+        lowered.startswith(".env.") and lowered.endswith(ENV_EXAMPLE_SUFFIXES)
+    )
+
+
+def is_sensitive_filename(path_text: str) -> bool:
+    normalized = path_text.replace("\\", "/").lower().strip("/")
+    name = normalized.rsplit("/", 1)[-1]
+    if is_environment_example_name(name):
         return False
     return (
-        lowered in SENSITIVE_NAMES
-        or (lowered.startswith(".env.") and lowered not in ENV_EXAMPLE_NAMES)
-        or Path(lowered).suffix in SENSITIVE_SUFFIXES
+        name in SENSITIVE_NAMES
+        or name.startswith(".env.")
+        or Path(name).suffix in SENSITIVE_SUFFIXES
+        or name.endswith(".tfstate.backup")
+        or any(normalized == path or normalized.endswith(f"/{path}") for path in SENSITIVE_PATHS)
     )
 
 
@@ -199,6 +228,8 @@ def project_automation(files: list[Path], rel_files: list[str]) -> dict[str, Any
     configured_tools: set[str] = set()
 
     for path, rel in zip(files, rel_files):
+        if is_sensitive_filename(rel):
+            continue
         name = path.name.lower()
         if name == "package.json":
             text = read_small_text(path)
@@ -231,7 +262,7 @@ def project_automation(files: list[Path], rel_files: list[str]) -> dict[str, Any
 def ci_action_references(files: list[Path], rel_files: list[str]) -> list[str]:
     references: set[str] = set()
     for path, rel in zip(files, rel_files):
-        if not rel.lower().startswith(".github/workflows/"):
+        if not rel.lower().startswith(".github/workflows/") or is_sensitive_filename(rel):
             continue
         text = read_small_text(path)
         if text is not None:
@@ -261,7 +292,7 @@ def collect(
         if suffix in LANGUAGE_BY_SUFFIX:
             languages[LANGUAGE_BY_SUFFIX[suffix]] += 1
         test_file = is_test(rel)
-        sensitive_file = is_sensitive_filename(path.name)
+        sensitive_file = is_sensitive_filename(rel)
         if not test_file and not sensitive_file:
             markers.update(contains_marker(path))
         try:
@@ -287,7 +318,7 @@ def collect(
     manifests = [rel for rel in rel_files if path_name(rel) in {x.lower() for x in MANIFESTS}]
     lockfiles = [rel for rel in rel_files if path_name(rel) in {x.lower() for x in LOCKFILES}]
     license_files = [rel for rel in rel_files if path_name(rel).startswith(("license", "licence", "copying"))]
-    env_examples = [rel for rel in rel_files if path_name(rel) in ENV_EXAMPLE_NAMES]
+    env_examples = [rel for rel in rel_files if is_environment_example_name(path_name(rel))]
     automation = project_automation(files, rel_files)
     git = git_metadata(root, tracked)
 
@@ -295,6 +326,7 @@ def collect(
         "schema_version": SCHEMA_VERSION,
         "root": str(root),
         "file_count": len(files),
+        "scan_file_limit": max_files,
         "scan_truncated": truncated,
         "excluded_directory_names": excluded,
         "git_repository": git["repository"],
@@ -323,9 +355,10 @@ def collect(
         ),
         "automation": automation,
         "work_markers": dict(markers),
-        "work_markers_scope": "non-test text files up to 1 MiB; comment-style markers only",
+        "work_markers_scope": "non-test, non-sensitive text files up to 1 MiB; comment-style markers only",
         "large_file_threshold_bytes": large_file_bytes,
-        "large_files": sorted(large_files, key=lambda item: item["bytes"], reverse=True)[:20],
+        "large_files_complete": True,
+        "large_files": sorted(large_files, key=lambda item: (-item["bytes"], item["path"])),
         "sensitive_looking_files": sorted(sensitive, key=lambda item: item["path"]),
     }
 
@@ -370,6 +403,7 @@ def to_markdown(data: dict[str, Any]) -> str:
         "",
         f"- Root: {markdown_code(data['root'])}",
         f"- Files scanned: {data['file_count']}" + (" (limit reached)" if data["scan_truncated"] else ""),
+        f"- Scan file limit: {data.get('scan_file_limit', 'Unknown')}",
         f"- Git repository: {'yes' if git['repository'] else 'no'}",
         f"- Git branch: {git['branch'] or 'Unknown'}",
         f"- Working tree: {git['working_tree']}",
@@ -411,9 +445,13 @@ def to_markdown(data: dict[str, Any]) -> str:
         + f" ({data['work_markers_scope']})",
     ]
     if data["large_files"]:
+        displayed_large_files = data["large_files"][:20]
         lines.append(f"- Large files (>={threshold_mib:g} MiB): " + ", ".join(
-            f"{markdown_code(item['path'])} ({item['bytes'] / 1_048_576:.1f} MiB)" for item in data["large_files"]
+            f"{markdown_code(item['path'])} ({item['bytes'] / 1_048_576:.1f} MiB)" for item in displayed_large_files
         ))
+        remaining = len(data["large_files"]) - len(displayed_large_files)
+        if remaining:
+            lines[-1] += f"; {remaining} more recorded in JSON output"
     else:
         lines.append(f"- Large files (>={threshold_mib:g} MiB): None found")
     if data["sensitive_looking_files"]:

@@ -53,8 +53,14 @@ def validate_snapshot(raw: dict[str, Any], path: Path) -> None:
         value = raw.get(field)
         if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 0):
             raise SnapshotError(f"field {field!r} must be a non-negative integer in {path}")
+    if "scan_file_limit" in raw:
+        scan_file_limit = raw["scan_file_limit"]
+        if not isinstance(scan_file_limit, int) or isinstance(scan_file_limit, bool) or scan_file_limit < 1:
+            raise SnapshotError(f"field 'scan_file_limit' must be a positive integer in {path}")
     if "scan_truncated" in raw and not isinstance(raw["scan_truncated"], bool):
         raise SnapshotError(f"field 'scan_truncated' must be a boolean in {path}")
+    if "large_files_complete" in raw and not isinstance(raw["large_files_complete"], bool):
+        raise SnapshotError(f"field 'large_files_complete' must be a boolean in {path}")
     if "root" in raw and raw["root"] is not None and not isinstance(raw["root"], str):
         raise SnapshotError(f"field 'root' must be a string or null in {path}")
 
@@ -157,6 +163,14 @@ def large_file_map(data: dict[str, Any]) -> dict[str, int]:
     return result
 
 
+def large_file_list_is_complete(data: dict[str, Any]) -> bool:
+    explicit = data.get("large_files_complete")
+    if isinstance(explicit, bool):
+        return explicit
+    value = data.get("large_files", [])
+    return isinstance(value, list) and len(value) < 20
+
+
 def append_set_change(
     changes: list[dict[str, Any]],
     before: dict[str, Any],
@@ -246,8 +260,11 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
 
     old_large = large_file_map(before)
     new_large = large_file_map(after)
-    large_added = sorted(set(new_large) - set(old_large))
-    large_removed = sorted(set(old_large) - set(new_large))
+    large_lists_complete = large_file_list_is_complete(before) and large_file_list_is_complete(after)
+    scans_complete = not before.get("scan_truncated") and not after.get("scan_truncated")
+    large_inventory_comparable = large_lists_complete and scans_complete
+    large_added = sorted(set(new_large) - set(old_large)) if large_inventory_comparable else []
+    large_removed = sorted(set(old_large) - set(new_large)) if large_inventory_comparable else []
     large_resized = [
         {
             "path": path,
@@ -297,6 +314,18 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
     ):
         if before.get(field) != after.get(field):
             limitations.append(f"The {label} differ between snapshots, so related deltas may not be comparable.")
+    before_has_limit = "scan_file_limit" in before
+    after_has_limit = "scan_file_limit" in after
+    if before_has_limit != after_has_limit:
+        limitations.append(
+            "The scan file limit is unavailable in one snapshot, so equivalent scan scope cannot be confirmed."
+        )
+    elif before_has_limit and before["scan_file_limit"] != after["scan_file_limit"]:
+        limitations.append("The scan file limits differ between snapshots, so file-count deltas may not be comparable.")
+    if not large_lists_complete:
+        limitations.append(
+            "At least one snapshot may contain only the legacy top-20 large-file list, so large-file additions and removals were not compared."
+        )
     if before.get("scan_truncated") or after.get("scan_truncated"):
         limitations.append("At least one scan reached its file limit, so the comparison may be incomplete.")
         attention.append({"code": "scan-truncated", "message": "At least one snapshot is truncated; rerun with a higher --max-files value."})
@@ -337,9 +366,13 @@ def human_bytes(value: int) -> str:
     return f"{value} B"
 
 
-def display_items(values: Iterable[str]) -> str:
+def display_items(values: Iterable[str], limit: int = 20) -> str:
     items = list(values)
-    return ", ".join(markdown_code(item) for item in items) if items else "none"
+    if not items:
+        return "none"
+    rendered = ", ".join(markdown_code(item) for item in items[:limit])
+    remaining = len(items) - limit
+    return rendered + (f", and {remaining} more in JSON output" if remaining > 0 else "")
 
 
 def render_change(change: dict[str, Any]) -> str:
@@ -355,10 +388,11 @@ def render_change(change: dict[str, Any]) -> str:
     if change.get("tracking_changed"):
         parts.append(f"tracking changed for {display_items(change['tracking_changed'])}")
     if change.get("resized"):
+        resized = change["resized"]
         parts.append("resized " + ", ".join(
             f"{markdown_code(item['path'])} ({human_bytes(item['before_bytes'])} -> {human_bytes(item['after_bytes'])})"
-            for item in change["resized"]
-        ))
+            for item in resized[:20]
+        ) + (f", and {len(resized) - 20} more in JSON output" if len(resized) > 20 else ""))
     return f"- **{change['label']}:** " + "; ".join(parts)
 
 
@@ -380,7 +414,10 @@ def to_markdown(result: dict[str, Any]) -> str:
     if not result["changes"]:
         lines.append("No tracked signal changes found.")
     lines.extend(["", "## Attention", ""])
-    lines.extend(f"- {item['message']}" for item in result["attention"])
+    displayed_attention = result["attention"][:50]
+    lines.extend(f"- {item['message']}" for item in displayed_attention)
+    if len(result["attention"]) > len(displayed_attention):
+        lines.append(f"- {len(result['attention']) - len(displayed_attention)} more attention items are available in JSON output.")
     if not result["attention"]:
         lines.append("No high-confidence attention items found.")
     lines.extend(["", "## Limits", ""])

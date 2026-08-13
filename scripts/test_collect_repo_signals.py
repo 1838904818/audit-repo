@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 import sys
 import tempfile
@@ -34,7 +35,17 @@ class CollectRepoSignalsTests(unittest.TestCase):
             (root / ".env").write_text("SECRET=do-not-print", encoding="utf-8")
             (root / ".env.production").write_text("SECRET=also-private", encoding="utf-8")
             (root / ".env.example").write_text("SECRET=placeholder", encoding="utf-8")
+            (root / ".env.production.example").write_text("SECRET=placeholder", encoding="utf-8")
             (root / "credentials.json").write_text('{"note":"# TODO private"}', encoding="utf-8")
+            (root / "client_secret.json").write_text('{"note":"# TODO oauth-secret"}', encoding="utf-8")
+            (root / "secrets.yml").write_text("# TODO private", encoding="utf-8")
+            (root / "terraform.tfstate.backup").write_text("# TODO private", encoding="utf-8")
+            (root / ".aws").mkdir()
+            (root / ".aws" / "credentials").write_text("# TODO private", encoding="utf-8")
+            (root / ".cargo").mkdir()
+            (root / ".cargo" / "credentials.toml").write_text("# TODO cargo-secret", encoding="utf-8")
+            (root / ".config" / "gh").mkdir(parents=True)
+            (root / ".config" / "gh" / "hosts.yml").write_text("# TODO gh-secret", encoding="utf-8")
             (root / "Dockerfile").write_text("FROM scratch", encoding="utf-8")
             (root / "Makefile").write_text("test:\n\tpython -m unittest\n", encoding="utf-8")
             (root / "src").mkdir()
@@ -44,6 +55,10 @@ class CollectRepoSignalsTests(unittest.TestCase):
             (root / ".github" / "workflows").mkdir(parents=True)
             (root / ".github" / "workflows" / "ci.yml").write_text(
                 "name: CI\nsteps:\n  - uses: actions/checkout@v7",
+                encoding="utf-8",
+            )
+            (root / ".github" / "workflows" / "secrets.yml").write_text(
+                "# TODO private\nsteps:\n  - uses: private-sentinel/action@secret",
                 encoding="utf-8",
             )
             (root / ".github" / "dependabot.yml").write_text("version: 2", encoding="utf-8")
@@ -56,14 +71,25 @@ class CollectRepoSignalsTests(unittest.TestCase):
             self.assertEqual(data["test_file_count"], 1)
             self.assertEqual(data["manifests"], ["package.json", "pyproject.toml"])
             self.assertEqual(data["documentation"], ["README.md"])
-            self.assertEqual(data["ci_files"], [".github/workflows/ci.yml"])
+            self.assertEqual(data["ci_files"], [".github/workflows/ci.yml", ".github/workflows/secrets.yml"])
             self.assertEqual(data["work_markers"]["TODO"], 1)
             self.assertNotIn("FIXME", data["work_markers"])
             self.assertEqual(
                 [item["path"] for item in data["sensitive_looking_files"]],
-                [".env", ".env.production", "credentials.json"],
+                [
+                    ".aws/credentials",
+                    ".cargo/credentials.toml",
+                    ".config/gh/hosts.yml",
+                    ".env",
+                    ".env.production",
+                    ".github/workflows/secrets.yml",
+                    "client_secret.json",
+                    "credentials.json",
+                    "secrets.yml",
+                    "terraform.tfstate.backup",
+                ],
             )
-            self.assertEqual(data["environment_examples"], [".env.example"])
+            self.assertEqual(data["environment_examples"], [".env.example", ".env.production.example"])
             self.assertEqual(data["automation"]["package_scripts"]["package.json"], ["lint", "test"])
             self.assertEqual(data["automation"]["make_targets"]["Makefile"], ["test"])
             self.assertIn("pytest", data["automation"]["configured_tools"])
@@ -73,6 +99,44 @@ class CollectRepoSignalsTests(unittest.TestCase):
             self.assertEqual(data["container_files"], ["Dockerfile"])
             self.assertNotIn("do-not-print", rendered)
             self.assertNotIn("also-private", rendered)
+            serialized = json.dumps(data)
+            self.assertNotIn("do-not-print", serialized)
+            self.assertNotIn("also-private", serialized)
+            self.assertNotIn("private-sentinel", serialized)
+            self.assertNotIn("oauth-secret", serialized)
+            self.assertNotIn("cargo-secret", serialized)
+            self.assertNotIn("gh-secret", serialized)
+
+    def test_sensitive_path_patterns_and_environment_examples(self) -> None:
+        sensitive = (
+            ".env.local",
+            ".env.production",
+            "AuthKey.p8",
+            "release.JKS",
+            "debug.keystore",
+            "vault.kdbx",
+            "terraform.tfstate",
+            "terraform.tfstate.backup",
+            "nested/.aws/credentials",
+            "nested/.cargo/credentials.toml",
+            "nested/.config/gh/hosts.yml",
+            "nested/.docker/config.json",
+            "nested/.kube/config",
+        )
+        safe_examples = (
+            ".env.example",
+            ".env.production.example",
+            ".env.sample",
+            "example.env",
+            "id_rsa.pub",
+        )
+
+        for path in sensitive:
+            with self.subTest(sensitive=path):
+                self.assertTrue(MODULE.is_sensitive_filename(path))
+        for path in safe_examples:
+            with self.subTest(safe=path):
+                self.assertFalse(MODULE.is_sensitive_filename(path))
 
     def test_scan_limit_is_reported(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -83,6 +147,7 @@ class CollectRepoSignalsTests(unittest.TestCase):
             data = MODULE.collect(root, 2)
 
             self.assertEqual(data["file_count"], 2)
+            self.assertEqual(data["scan_file_limit"], 2)
             self.assertTrue(data["scan_truncated"])
 
     def test_exact_scan_limit_is_not_reported_as_truncated(self) -> None:
@@ -109,6 +174,21 @@ class CollectRepoSignalsTests(unittest.TestCase):
             self.assertEqual(data["excluded_directory_names"], ["generated"])
             self.assertEqual(data["large_files"][0]["path"], "keep.py")
             self.assertEqual(data["work_markers"], {})
+
+    def test_json_keeps_complete_large_file_inventory_while_markdown_is_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            for index in range(23):
+                (root / f"large-{index:02}.bin").write_bytes(b"x" * (index + 1))
+
+            data = MODULE.collect(root, 100, large_file_bytes=1)
+            rendered = MODULE.to_markdown(data)
+
+            self.assertEqual(len(data["large_files"]), 23)
+            self.assertTrue(data["large_files_complete"])
+            self.assertEqual(data["large_files"][0]["path"], "large-22.bin")
+            self.assertIn("3 more recorded in JSON output", rendered)
+            self.assertNotIn("`large-00.bin`", rendered)
 
     def test_markdown_escapes_untrusted_paths(self) -> None:
         data = MODULE.collect(Path(__file__).parent, 100)

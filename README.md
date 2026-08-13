@@ -13,10 +13,11 @@ An evidence-backed, read-only repository health audit Skill for Codex, with stan
 
 - Collect repository signals as Markdown or JSON without installing project dependencies.
 - Detect Git state, manifests, lockfiles, tests, CI, automation, ownership, containers, work markers, large files, and sensitive-looking filenames.
-- Compare two audit snapshots and surface meaningful changes over time.
+- Compare configuration-aware audit snapshots and surface meaningful changes over time.
 - Flag high-confidence attention items such as newly detected sensitive filenames, lost CI or tests, and new large files.
 - Keep secret values private: filename checks never read or print sensitive file contents.
-- Support custom directory exclusions, file limits, and large-file thresholds.
+- Preserve complete large-file inventories in JSON while keeping Markdown reports bounded and readable.
+- Support custom directory exclusions, recorded file limits, and large-file thresholds.
 
 The collector produces inventory signals, not automatic findings. The Skill tells Codex to verify context and evidence before assigning impact or priority.
 
@@ -93,6 +94,8 @@ Comparison exit codes:
 - `1`: attention items found when `--fail-on-attention` is enabled
 - `2`: invalid input or execution error
 
+New JSON snapshots record the configured file limit and retain every large file found within the scanned scope. Markdown output displays at most 20 items per long change list and points to JSON for the complete data. When an older snapshot may contain only the legacy top-20 large-file list, the comparer reports a limitation and suppresses unreliable large-file addition/removal alerts.
+
 Run `python scripts/collect_repo_signals.py --help` or `python scripts/compare_repo_signals.py --help` for all options.
 
 ## What the audit covers
@@ -112,6 +115,7 @@ See [SKILL.md](SKILL.md) for the agent workflow, [audit rubric](references/rubri
 
 - [Wiki](https://github.com/1838904818/audit-repo/wiki) for task-oriented guides and CLI details
 - [Releases](https://github.com/1838904818/audit-repo/releases) for versioned, checksummed Skill archives
+- [Changelog](CHANGELOG.md) for version-by-version behavior and compatibility notes
 - [Contributing guide](https://github.com/1838904818/audit-repo/blob/main/CONTRIBUTING.md) for local validation and change expectations
 - [Security policy](https://github.com/1838904818/audit-repo/security/policy) for private vulnerability reporting
 
@@ -137,7 +141,7 @@ python scripts/collect_repo_signals.py 项目路径 --format json --output befor
 python scripts/compare_repo_signals.py before.json after.json --format markdown
 ```
 
-扫描器不会读取或输出疑似密钥文件的内容。它提供的是待核实信号，最终问题等级应结合实际代码和项目用途判断。
+扫描器不会读取或输出疑似密钥文件的内容。新版 JSON 快照会记录扫描文件上限并保留完整的大文件清单；Markdown 只展示有限条目，避免报告失控。它提供的是待核实信号，最终问题等级应结合实际代码和项目用途判断。
 
 ## Development
 

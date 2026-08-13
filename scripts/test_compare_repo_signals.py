@@ -24,6 +24,7 @@ def snapshot(**overrides: object) -> dict[str, object]:
         "schema_version": 1,
         "root": "/repo",
         "file_count": 10,
+        "scan_file_limit": 50_000,
         "scan_truncated": False,
         "excluded_directory_names": [],
         "large_file_threshold_bytes": 5 * 1024 * 1024,
@@ -40,6 +41,7 @@ def snapshot(**overrides: object) -> dict[str, object]:
         "container_files": [],
         "environment_examples": [],
         "sensitive_looking_files": [],
+        "large_files_complete": True,
         "large_files": [],
         "automation": {"configured_tools": ["pytest"]},
     }
@@ -81,6 +83,48 @@ class CompareRepoSignalsTests(unittest.TestCase):
         self.assertEqual(len(result["limitations"]), 3)
         self.assertIn("scan-truncated", {item["code"] for item in result["attention"]})
 
+    def test_reports_scan_file_limit_mismatch(self) -> None:
+        result = MODULE.compare(snapshot(scan_file_limit=50_000), snapshot(scan_file_limit=100_000))
+
+        self.assertFalse(result["summary"]["comparable"])
+        self.assertEqual(result["summary"]["attention_count"], 0)
+        self.assertIn("scan file limits differ", result["limitations"][0])
+
+        legacy = snapshot()
+        legacy.pop("scan_file_limit")
+        mixed_result = MODULE.compare(legacy, snapshot())
+        self.assertTrue(any("unavailable in one snapshot" in item for item in mixed_result["limitations"]))
+
+        older_before = snapshot()
+        older_after = snapshot()
+        older_before.pop("scan_file_limit")
+        older_after.pop("scan_file_limit")
+        self.assertTrue(MODULE.compare(older_before, older_after)["summary"]["comparable"])
+
+    def test_legacy_top_20_large_file_list_suppresses_unreliable_additions(self) -> None:
+        legacy_files = [{"path": f"large-{index:02}.bin", "bytes": 10_000_000 + index} for index in range(20)]
+        before = snapshot(large_files=legacy_files)
+        before.pop("large_files_complete")
+        after = snapshot(large_files=legacy_files + [{"path": "possibly-old.bin", "bytes": 11_000_000}])
+
+        result = MODULE.compare(before, after)
+        codes = {item["code"] for item in result["attention"]}
+
+        self.assertNotIn("large-file-added", codes)
+        self.assertFalse(result["summary"]["comparable"])
+        self.assertTrue(any("legacy top-20" in item for item in result["limitations"]))
+
+    def test_truncated_scan_suppresses_unreliable_large_file_additions(self) -> None:
+        before = snapshot(scan_truncated=True, large_files=[])
+        after = snapshot(scan_truncated=True, large_files=[{"path": "already-there.bin", "bytes": 10_000_000}])
+
+        result = MODULE.compare(before, after)
+        codes = {item["code"] for item in result["attention"]}
+
+        self.assertNotIn("large-file-added", codes)
+        self.assertIn("scan-truncated", codes)
+        self.assertFalse(any(change["field"] == "large_files" for change in result["changes"]))
+
     def test_reports_significant_growth_of_existing_large_file(self) -> None:
         before = snapshot(large_files=[{"path": "model.bin", "bytes": 6_000_000}])
         after = snapshot(large_files=[{"path": "model.bin", "bytes": 6_000_000_000}])
@@ -102,6 +146,26 @@ class CompareRepoSignalsTests(unittest.TestCase):
             path.write_text(json.dumps({"schema_version": 99}), encoding="utf-8")
             with self.assertRaises(MODULE.SnapshotError):
                 MODULE.load_snapshot(path)
+
+            path.write_text(json.dumps({"schema_version": 1, "scan_file_limit": 0}), encoding="utf-8")
+            with self.assertRaises(MODULE.SnapshotError):
+                MODULE.load_snapshot(path)
+
+            for invalid in (-1, True, "50000", None):
+                with self.subTest(scan_file_limit=invalid):
+                    path.write_text(json.dumps({"schema_version": 1, "scan_file_limit": invalid}), encoding="utf-8")
+                    with self.assertRaises(MODULE.SnapshotError):
+                        MODULE.load_snapshot(path)
+
+    def test_markdown_bounds_large_change_lists_but_json_remains_complete(self) -> None:
+        added = [{"path": f"large-{index:02}.bin", "bytes": 10_000_000} for index in range(25)]
+        result = MODULE.compare(snapshot(), snapshot(large_files=added))
+        change = next(item for item in result["changes"] if item["field"] == "large_files")
+        rendered = MODULE.to_markdown(result)
+
+        self.assertEqual(len(change["added"]), 25)
+        self.assertEqual(result["summary"]["attention_count"], 25)
+        self.assertIn("and 5 more in JSON output", rendered)
 
     def test_cli_fail_on_attention_exit_code(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

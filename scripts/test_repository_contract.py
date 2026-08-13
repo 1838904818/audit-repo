@@ -52,6 +52,7 @@ class RepositoryContractTests(unittest.TestCase):
         for relative in (
             "README.md",
             "SKILL.md",
+            "CHANGELOG.md",
             "LICENSE",
             ".gitattributes",
             "CONTRIBUTING.md",
@@ -77,6 +78,13 @@ class RepositoryContractTests(unittest.TestCase):
             self.assertTrue(action_refs, f"no action references found in {relative}")
             for action_ref in action_refs:
                 self.assertRegex(action_ref, r"^[^@]+@[0-9a-f]{40}$")
+
+    def test_release_workflow_validates_assets_and_is_rerunnable(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        self.assertIn("Exercise packaged Skill", workflow)
+        self.assertIn("gh release download", workflow)
+        self.assertIn("cmp ", workflow)
+        self.assertNotIn("--clobber", workflow)
 
 
 if __name__ == "__main__":
