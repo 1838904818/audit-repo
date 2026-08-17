@@ -51,6 +51,7 @@ class RepositoryContractTests(unittest.TestCase):
     def test_required_public_files_exist(self) -> None:
         for relative in (
             "README.md",
+            "action.yml",
             "SKILL.md",
             "CHANGELOG.md",
             "LICENSE",
@@ -79,6 +80,13 @@ class RepositoryContractTests(unittest.TestCase):
             self.assertTrue(action_refs, f"no action references found in {relative}")
             for action_ref in action_refs:
                 self.assertRegex(action_ref, r"^[^@]+@[0-9a-f]{40}$")
+
+    def test_composite_action_exposes_expected_contract(self) -> None:
+        action = (ROOT / "action.yml").read_text(encoding="utf-8")
+        self.assertIn("using: composite", action)
+        self.assertIn("scripts/check_repo.py", action)
+        for name in ("snapshot", "report", "comparison", "attention-count", "comparable"):
+            self.assertRegex(action, rf"(?m)^  {re.escape(name)}:\s*$")
 
     def test_release_workflow_validates_assets_and_is_rerunnable(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")

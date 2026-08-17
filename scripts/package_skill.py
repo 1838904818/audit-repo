@@ -25,6 +25,7 @@ RUNTIME_FILES = (
     Path("references/rubric.md"),
     Path("scripts/collect_repo_signals.py"),
     Path("scripts/compare_repo_signals.py"),
+    Path("scripts/check_repo.py"),
 )
 
 

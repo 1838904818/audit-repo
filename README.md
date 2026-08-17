@@ -112,6 +112,16 @@ Compare two snapshots:
 python scripts/compare_repo_signals.py before.json after.json --format markdown
 ```
 
+Run the complete workflow with one command. It always writes `snapshot.json` and `report.md`; when a baseline is supplied it also writes `comparison.json`:
+
+```bash
+python scripts/check_repo.py /path/to/repo --output-dir audit-results
+python scripts/check_repo.py /path/to/repo \
+  --baseline previous-snapshot.json \
+  --output-dir audit-results \
+  --fail-on-attention --require-comparable
+```
+
 Use snapshot comparison in automation, failing both on high-confidence attention items and on an incomparable baseline:
 
 ```bash
@@ -127,6 +137,35 @@ Comparison exit codes:
 New JSON snapshots record their mode, logical path scope, configured file limit, scan completeness, and every large file found within the scanned scope. Markdown output displays at most 20 items per long change list and points to JSON for the complete data. A stable non-empty `--scope-id` lets equivalent checkouts at different absolute roots compare safely. When an older snapshot may contain only the legacy top-20 large-file list, the comparer reports a limitation and suppresses unreliable large-file addition/removal alerts.
 
 Run `python scripts/collect_repo_signals.py --help` or `python scripts/compare_repo_signals.py --help` for all options.
+
+## GitHub Actions
+
+Use the repository directly as a composite Action. Pin a release tag or commit SHA in production workflows:
+
+```yaml
+- uses: 1838904818/audit-repo@v1.4.0
+  id: audit
+  with:
+    scan-mode: tracked
+    scope-id: whole-repository
+    output-dir: ${{ runner.temp }}/audit-repo
+```
+
+The Action requires Python 3.10 or newer on the runner and does not install project dependencies. Its outputs include `snapshot`, `report`, `comparison`, `attention-count`, and `comparable`; callers can upload the files with their preferred artifact action.
+
+For a checked-in baseline, enable both policy gates:
+
+```yaml
+- uses: 1838904818/audit-repo@v1.4.0
+  with:
+    baseline: .github/audit-baseline.json
+    scan-mode: tracked
+    scope-id: whole-repository
+    fail-on-attention: "true"
+    require-comparable: "true"
+```
+
+`include-paths`, `exclude-paths`, and `exclude-dirs` accept newline-separated values. A run without `baseline` is collection-only, so comparison gates do not apply.
 
 ## What the audit covers
 

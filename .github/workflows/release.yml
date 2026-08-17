@@ -47,6 +47,7 @@ jobs:
           python -m zipfile -e "dist/audit-repo-${GITHUB_REF_NAME}.zip" dist/extracted
           python dist/extracted/audit-repo/scripts/collect_repo_signals.py dist/extracted/audit-repo --scope-id packaged-skill --format json --output dist/package-smoke.json
           python dist/extracted/audit-repo/scripts/compare_repo_signals.py dist/package-smoke.json dist/package-smoke.json --format markdown --fail-on-attention --require-comparable
+          python dist/extracted/audit-repo/scripts/check_repo.py dist/extracted/audit-repo --scope-id packaged-skill --output-dir dist/runner-smoke
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-assets

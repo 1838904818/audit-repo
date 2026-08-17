@@ -2,6 +2,19 @@
 
 All notable changes to `audit-repo` are documented here. The project follows semantic versioning.
 
+## [1.4.0] - 2026-08-17
+
+### Added
+
+- Add `scripts/check_repo.py` as a one-command audit runner that writes a JSON snapshot and Markdown report.
+- Add a reusable composite GitHub Action with optional baseline comparison, attention, and comparability gates.
+- Expose snapshot, report, comparison, attention-count, and comparability paths or values as Action outputs.
+
+### Changed
+
+- Exercise the one-command runner and local composite Action in the cross-platform CI matrix.
+- Include the one-command runner in versioned Skill archives.
+
 ## [1.3.0] - 2026-08-13
 
 ### Added
@@ -65,6 +78,7 @@ All notable changes to `audit-repo` are documented here. The project follows sem
 
 - First stable release of the Codex Skill, repository signal collector, snapshot comparer, tests, and CI.
 
+[1.4.0]: https://github.com/1838904818/audit-repo/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/1838904818/audit-repo/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/1838904818/audit-repo/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/1838904818/audit-repo/compare/v1.0.1...v1.1.0

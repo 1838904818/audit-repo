@@ -1,0 +1,82 @@
+name: Audit Repo
+description: Collect repository health signals and optionally compare them with a JSON baseline.
+inputs:
+  path:
+    description: Repository path to scan.
+    default: .
+  output-dir:
+    description: Directory for snapshot.json, report.md, and optional comparison.json.
+    default: audit-repo-results
+  baseline:
+    description: Optional path to an earlier audit-repo JSON snapshot.
+    default: ""
+  scan-mode:
+    description: filesystem, git-visible, or tracked.
+    default: tracked
+  scope-id:
+    description: Stable logical scope identifier used for comparison.
+    default: repository
+  include-paths:
+    description: Newline-separated root-relative include globs.
+    default: ""
+  exclude-paths:
+    description: Newline-separated root-relative exclude globs.
+    default: ""
+  exclude-dirs:
+    description: Newline-separated directory names to exclude.
+    default: ""
+  max-files:
+    description: Maximum selected files before the scan is marked truncated.
+    default: "50000"
+  large-file-mib:
+    description: Large-file threshold in MiB.
+    default: "5"
+  fail-on-attention:
+    description: Return a failing status when comparison attention items exist.
+    default: "false"
+  require-comparable:
+    description: Return a failing status when the baseline is not directly comparable.
+    default: "false"
+outputs:
+  snapshot:
+    description: Absolute path to the generated JSON snapshot.
+    value: ${{ steps.audit.outputs.snapshot }}
+  report:
+    description: Absolute path to the generated Markdown report.
+    value: ${{ steps.audit.outputs.report }}
+  comparison:
+    description: Absolute path to comparison.json, or empty when no baseline was supplied.
+    value: ${{ steps.audit.outputs.comparison }}
+  attention-count:
+    description: Number of comparison attention items.
+    value: ${{ steps.audit.outputs.attention-count }}
+  comparable:
+    description: Whether the baseline comparison is directly comparable.
+    value: ${{ steps.audit.outputs.comparable }}
+runs:
+  using: composite
+  steps:
+    - id: audit
+      shell: bash
+      env:
+        AUDIT_PATH: ${{ inputs.path }}
+        AUDIT_OUTPUT_DIR: ${{ inputs.output-dir }}
+        AUDIT_BASELINE: ${{ inputs.baseline }}
+        AUDIT_SCAN_MODE: ${{ inputs.scan-mode }}
+        AUDIT_SCOPE_ID: ${{ inputs.scope-id }}
+        AUDIT_INCLUDE_PATHS: ${{ inputs.include-paths }}
+        AUDIT_EXCLUDE_PATHS: ${{ inputs.exclude-paths }}
+        AUDIT_EXCLUDE_DIRS: ${{ inputs.exclude-dirs }}
+        AUDIT_MAX_FILES: ${{ inputs.max-files }}
+        AUDIT_LARGE_FILE_MIB: ${{ inputs.large-file-mib }}
+        AUDIT_FAIL_ON_ATTENTION: ${{ inputs.fail-on-attention }}
+        AUDIT_REQUIRE_COMPARABLE: ${{ inputs.require-comparable }}
+      run: |
+        args=("$AUDIT_PATH" --output-dir "$AUDIT_OUTPUT_DIR" --scan-mode "$AUDIT_SCAN_MODE" --scope-id "$AUDIT_SCOPE_ID" --max-files "$AUDIT_MAX_FILES" --large-file-mib "$AUDIT_LARGE_FILE_MIB" --github-output "$GITHUB_OUTPUT")
+        if [[ -n "$AUDIT_BASELINE" ]]; then args+=(--baseline "$AUDIT_BASELINE"); fi
+        if [[ "$AUDIT_FAIL_ON_ATTENTION" == "true" ]]; then args+=(--fail-on-attention); fi
+        if [[ "$AUDIT_REQUIRE_COMPARABLE" == "true" ]]; then args+=(--require-comparable); fi
+        while IFS= read -r value; do [[ -z "$value" ]] || args+=(--include-path "$value"); done <<< "$AUDIT_INCLUDE_PATHS"
+        while IFS= read -r value; do [[ -z "$value" ]] || args+=(--exclude-path "$value"); done <<< "$AUDIT_EXCLUDE_PATHS"
+        while IFS= read -r value; do [[ -z "$value" ]] || args+=(--exclude-dir "$value"); done <<< "$AUDIT_EXCLUDE_DIRS"
+        python "$GITHUB_ACTION_PATH/scripts/check_repo.py" "${args[@]}"
