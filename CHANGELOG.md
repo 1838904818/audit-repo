@@ -2,6 +2,18 @@
 
 All notable changes to `audit-repo` are documented here. The project follows semantic versioning.
 
+## [1.5.0] - 2026-08-18
+
+### Added
+
+- Add macOS to continuous integration and release verification.
+- Test every supported Python minor version from 3.10 through 3.14 in CI.
+
+### Changed
+
+- Require the release test matrix to pass on Linux, Windows, and macOS at both the minimum and latest supported Python versions.
+- Build release assets with Python 3.14 while preserving deterministic archive output.
+
 ## [1.4.0] - 2026-08-17
 
 ### Added
@@ -78,6 +90,7 @@ All notable changes to `audit-repo` are documented here. The project follows sem
 
 - First stable release of the Codex Skill, repository signal collector, snapshot comparer, tests, and CI.
 
+[1.5.0]: https://github.com/1838904818/audit-repo/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/1838904818/audit-repo/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/1838904818/audit-repo/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/1838904818/audit-repo/compare/v1.1.0...v1.2.0

@@ -29,7 +29,7 @@ The easiest option in Codex is to ask the built-in installer to install this rep
 Use $skill-installer to install https://github.com/1838904818/audit-repo.
 ```
 
-For an offline or version-pinned installation, download the `.zip` and matching `.sha256` file from the [latest release](https://github.com/1838904818/audit-repo/releases/latest). Verify the checksum, then extract the archive's top-level `audit-repo` directory into `$HOME/.agents/skills`. Release assets are built only after the full test matrix passes on Windows and Linux with Python 3.10 and 3.13.
+For an offline or version-pinned installation, download the `.zip` and matching `.sha256` file from the [latest release](https://github.com/1838904818/audit-repo/releases/latest). Verify the checksum, then extract the archive's top-level `audit-repo` directory into `$HOME/.agents/skills`. Release assets are built only after the full test matrix passes on Linux, Windows, and macOS with Python 3.10 and 3.14.
 
 For a manual user-wide installation, clone the repository into the official local skills directory. See the [OpenAI Build skills documentation](https://learn.chatgpt.com/docs/build-skills) for current locations and invocation methods.
 
@@ -62,7 +62,7 @@ Codex can also invoke it automatically for repository health, release readiness,
 
 ## Standalone usage
 
-Requires Python 3.10 or newer. The scripts use only the Python standard library.
+Requires Python 3.10 or newer. Python 3.10 through 3.14 are continuously tested, and the scripts use only the Python standard library.
 
 Audit a repository:
 
@@ -143,7 +143,7 @@ Run `python scripts/collect_repo_signals.py --help` or `python scripts/compare_r
 Use the repository directly as a composite Action. Pin a release tag or commit SHA in production workflows:
 
 ```yaml
-- uses: 1838904818/audit-repo@v1.4.0
+- uses: 1838904818/audit-repo@v1.5.0
   id: audit
   with:
     scan-mode: tracked
@@ -156,7 +156,7 @@ The Action requires Python 3.10 or newer on the runner and does not install proj
 For a checked-in baseline, enable both policy gates:
 
 ```yaml
-- uses: 1838904818/audit-repo@v1.4.0
+- uses: 1838904818/audit-repo@v1.5.0
   with:
     baseline: .github/audit-baseline.json
     scan-mode: tracked
@@ -228,7 +228,7 @@ Build the same deterministic assets used by GitHub Releases:
 python scripts/package_skill.py --version v1.2.3 --output-dir dist
 ```
 
-CI exercises Markdown output, JSON output, snapshot comparison, repository contracts, and deterministic packaging on every push. Release tags additionally run the full cross-platform matrix before publishing assets.
+CI exercises Markdown output, JSON output, snapshot comparison, repository contracts, the composite Action, and deterministic packaging across Linux, Windows, and macOS. It covers every supported Python minor version from 3.10 through 3.14; release tags verify the minimum and latest versions on all three operating systems before publishing assets.
 
 ## License
 

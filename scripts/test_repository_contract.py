@@ -95,6 +95,17 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("cmp ", workflow)
         self.assertNotIn("--clobber", workflow)
 
+    def test_ci_covers_supported_platforms_and_python_versions(self) -> None:
+        ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        release = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        for operating_system in ("ubuntu-latest", "windows-latest", "macos-latest"):
+            self.assertIn(operating_system, ci)
+            self.assertIn(operating_system, release)
+        for version in ("3.10", "3.11", "3.12", "3.13", "3.14"):
+            self.assertIn(f'"{version}"', ci)
+        self.assertIn('"3.10"', release)
+        self.assertIn('"3.14"', release)
+
 
 if __name__ == "__main__":
     unittest.main()
