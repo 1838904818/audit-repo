@@ -439,7 +439,10 @@ class CollectRepoSignalsTests(unittest.TestCase):
             raw_root = os.fsencode(root)
             raw_name = b"test_invalid_\xff.py"
             subprocess.run([b"git", b"-C", raw_root, b"init", b"-q"], check=True, timeout=10)
-            descriptor = os.open(os.path.join(raw_root, raw_name), os.O_WRONLY | os.O_CREAT, 0o600)
+            try:
+                descriptor = os.open(os.path.join(raw_root, raw_name), os.O_WRONLY | os.O_CREAT, 0o600)
+            except OSError as error:
+                self.skipTest(f"filesystem rejects non-UTF-8 byte paths: {error}")
             try:
                 os.write(descriptor, b"print('ok')\n")
             finally:

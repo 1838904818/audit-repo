@@ -13,6 +13,7 @@ All notable changes to `audit-repo` are documented here. The project follows sem
 
 - Require the release test matrix to pass on Linux, Windows, and macOS at both the minimum and latest supported Python versions.
 - Build release assets with Python 3.14 while preserving deterministic archive output.
+- Skip the Linux-specific raw-byte filename round-trip test on POSIX filesystems that reject non-UTF-8 byte paths.
 
 ## [1.4.0] - 2026-08-17
 
