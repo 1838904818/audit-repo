@@ -85,7 +85,7 @@ class RepositoryContractTests(unittest.TestCase):
         action = (ROOT / "action.yml").read_text(encoding="utf-8")
         self.assertIn("using: composite", action)
         self.assertIn("scripts/check_repo.py", action)
-        for name in ("snapshot", "report", "comparison", "attention-count", "comparable"):
+        for name in ("snapshot", "report", "comparison", "sarif", "attention-count", "comparable"):
             self.assertRegex(action, rf"(?m)^  {re.escape(name)}:\s*$")
 
     def test_release_workflow_validates_assets_and_is_rerunnable(self) -> None:

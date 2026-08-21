@@ -2,6 +2,18 @@
 
 All notable changes to `audit-repo` are documented here. The project follows semantic versioning.
 
+## [1.6.0] - 2026-08-21
+
+### Added
+
+- Add SARIF 2.1.0 output for snapshot attention signals and comparison limitations.
+- Add `comparison.sarif` to one-command baseline runs and expose its path from the composite GitHub Action.
+- Exercise SARIF generation in the full cross-platform CI and packaged-Skill release checks.
+
+### Changed
+
+- Keep SARIF severity separate from policy exit codes and label every exported result as a signal requiring verification rather than a confirmed vulnerability.
+
 ## [1.5.0] - 2026-08-18
 
 ### Added
@@ -91,6 +103,7 @@ All notable changes to `audit-repo` are documented here. The project follows sem
 
 - First stable release of the Codex Skill, repository signal collector, snapshot comparer, tests, and CI.
 
+[1.6.0]: https://github.com/1838904818/audit-repo/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/1838904818/audit-repo/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/1838904818/audit-repo/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/1838904818/audit-repo/compare/v1.2.0...v1.3.0

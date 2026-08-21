@@ -112,7 +112,7 @@ Compare two snapshots:
 python scripts/compare_repo_signals.py before.json after.json --format markdown
 ```
 
-Run the complete workflow with one command. It always writes `snapshot.json` and `report.md`; when a baseline is supplied it also writes `comparison.json`:
+Run the complete workflow with one command. It always writes `snapshot.json` and `report.md`; when a baseline is supplied it also writes `comparison.json` and `comparison.sarif`:
 
 ```bash
 python scripts/check_repo.py /path/to/repo --output-dir audit-results
@@ -127,6 +127,15 @@ Use snapshot comparison in automation, failing both on high-confidence attention
 ```bash
 python scripts/compare_repo_signals.py before.json after.json --fail-on-attention --require-comparable
 ```
+
+Produce SARIF 2.1.0 for code-scanning viewers and CI systems:
+
+```bash
+python scripts/compare_repo_signals.py before.json after.json \
+  --format sarif --output audit-repo.sarif
+```
+
+SARIF `warning` results are attention signals and `note` results are comparison limitations. They require repository-context verification and are not confirmed vulnerabilities. Policy exit codes remain controlled separately by `--fail-on-attention` and `--require-comparable`.
 
 Comparison exit codes:
 
@@ -143,7 +152,7 @@ Run `python scripts/collect_repo_signals.py --help` or `python scripts/compare_r
 Use the repository directly as a composite Action. Pin a release tag or commit SHA in production workflows:
 
 ```yaml
-- uses: 1838904818/audit-repo@v1.5.0
+- uses: 1838904818/audit-repo@v1.6.0
   id: audit
   with:
     scan-mode: tracked
@@ -151,12 +160,12 @@ Use the repository directly as a composite Action. Pin a release tag or commit S
     output-dir: ${{ runner.temp }}/audit-repo
 ```
 
-The Action requires Python 3.10 or newer on the runner and does not install project dependencies. Its outputs include `snapshot`, `report`, `comparison`, `attention-count`, and `comparable`; callers can upload the files with their preferred artifact action.
+The Action requires Python 3.10 or newer on the runner and does not install project dependencies. Its outputs include `snapshot`, `report`, `comparison`, `sarif`, `attention-count`, and `comparable`; callers can upload the files with their preferred artifact or SARIF ingestion action.
 
 For a checked-in baseline, enable both policy gates:
 
 ```yaml
-- uses: 1838904818/audit-repo@v1.5.0
+- uses: 1838904818/audit-repo@v1.6.0
   with:
     baseline: .github/audit-baseline.json
     scan-mode: tracked

@@ -47,6 +47,9 @@ outputs:
   comparison:
     description: Absolute path to comparison.json, or empty when no baseline was supplied.
     value: ${{ steps.audit.outputs.comparison }}
+  sarif:
+    description: Absolute path to comparison.sarif, or empty when no baseline was supplied.
+    value: ${{ steps.audit.outputs.sarif }}
   attention-count:
     description: Number of comparison attention items.
     value: ${{ steps.audit.outputs.attention-count }}

@@ -84,6 +84,7 @@ def main() -> int:
     snapshot = output_dir / "snapshot.json"
     report = output_dir / "report.md"
     comparison = output_dir / "comparison.json"
+    sarif = output_dir / "comparison.sarif"
     common = [
         str(repository), "--scan-mode", args.scan_mode, "--scope-id", args.scope_id,
         "--max-files", str(args.max_files), "--large-file-mib", str(args.large_file_mib),
@@ -117,6 +118,8 @@ def main() -> int:
             return 2
         if not write_text(report, comparer.to_markdown(result), "Markdown report"):
             return 2
+        if not write_text(sarif, json.dumps(comparer.to_sarif(result), indent=2, ensure_ascii=True) + "\n", "SARIF report"):
+            return 2
         attention_failed = args.fail_on_attention and bool(result["attention"])
         comparability_failed = args.require_comparable and not result["summary"]["comparable"]
         status = 1 if attention_failed or comparability_failed else 0
@@ -135,6 +138,7 @@ def main() -> int:
             "snapshot": str(snapshot),
             "report": str(report),
             "comparison": str(comparison) if args.baseline else "",
+            "sarif": str(sarif) if args.baseline else "",
             "attention-count": attention_count,
             "comparable": comparable,
         }
@@ -144,6 +148,7 @@ def main() -> int:
     print(f"report={report}")
     if args.baseline:
         print(f"comparison={comparison}")
+        print(f"sarif={sarif}")
         print(f"attention_count={attention_count}")
         print(f"comparable={comparable}")
     return status

@@ -87,6 +87,22 @@ class CompareRepoSignalsTests(unittest.TestCase):
         self.assertEqual(len(result["limitations"]), 3)
         self.assertIn("scan-truncated", {item["code"] for item in result["attention"]})
 
+    def test_renders_attention_and_limitations_as_sarif_signals(self) -> None:
+        result = MODULE.compare(
+            snapshot(),
+            snapshot(scan_file_limit=100_000, work_markers={"TODO": 2}),
+        )
+
+        sarif = MODULE.to_sarif(result)
+        run = sarif["runs"][0]
+        rendered = run["results"]
+
+        self.assertEqual(sarif["version"], "2.1.0")
+        self.assertEqual(run["tool"]["driver"]["name"], "audit-repo")
+        self.assertEqual({item["ruleId"] for item in rendered}, {"work-markers-increased", "comparison-limitation"})
+        self.assertEqual({item["level"] for item in rendered}, {"warning", "note"})
+        self.assertIn("not confirmed vulnerabilities", run["properties"]["notice"])
+
     def test_reports_scan_file_limit_mismatch(self) -> None:
         result = MODULE.compare(snapshot(scan_file_limit=50_000), snapshot(scan_file_limit=100_000))
 
@@ -492,7 +508,7 @@ class CompareRepoSignalsTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            for output_format in ("markdown", "json"):
+            for output_format in ("markdown", "json", "sarif"):
                 with self.subTest(output_format=output_format):
                     result = subprocess.run(
                         [
@@ -536,7 +552,7 @@ class CompareRepoSignalsTests(unittest.TestCase):
             before_path.write_text(json.dumps(snapshot(root="\ud800")), encoding="utf-8")
             after_path.write_text(json.dumps(snapshot()), encoding="utf-8")
 
-            for output_format in ("markdown", "json"):
+            for output_format in ("markdown", "json", "sarif"):
                 with self.subTest(output_format=output_format):
                     result = subprocess.run(
                         [
@@ -558,7 +574,7 @@ class CompareRepoSignalsTests(unittest.TestCase):
                     self.assertNotIn("Traceback", result.stderr)
                     self.assertEqual(result.stderr, "")
                     result.stdout.encode("utf-8")
-                    if output_format == "json":
+                    if output_format in ("json", "sarif"):
                         self.assertIn("\\ud800", result.stdout)
                     else:
                         self.assertIn("?", result.stdout)

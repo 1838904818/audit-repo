@@ -553,11 +553,68 @@ def to_markdown(result: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def to_sarif(result: dict[str, Any]) -> dict[str, Any]:
+    """Render attention items and limitations as portable SARIF 2.1.0 signals."""
+    rule_ids = sorted({item["code"] for item in result["attention"]})
+    rules = [
+        {
+            "id": rule_id,
+            "shortDescription": {"text": rule_id.replace("-", " ").capitalize()},
+            "helpUri": "https://github.com/1838904818/audit-repo/wiki/Snapshot-Comparison",
+            "properties": {"tags": ["repository-health", "audit-repo"]},
+        }
+        for rule_id in rule_ids
+    ]
+    if result["limitations"]:
+        rules.append({
+            "id": "comparison-limitation",
+            "shortDescription": {"text": "Snapshot comparison limitation"},
+            "helpUri": "https://github.com/1838904818/audit-repo/wiki/Snapshot-Comparison",
+            "properties": {"tags": ["repository-health", "audit-repo", "comparability"]},
+        })
+    results = [
+        {
+            "ruleId": item["code"],
+            "level": "warning",
+            "message": {"text": item["message"]},
+            "properties": {"kind": "attention", "findingStatus": "signal-needs-verification"},
+        }
+        for item in result["attention"]
+    ]
+    results.extend(
+        {
+            "ruleId": "comparison-limitation",
+            "level": "note",
+            "message": {"text": limitation},
+            "properties": {"kind": "limitation", "findingStatus": "not-a-finding"},
+        }
+        for limitation in result["limitations"]
+    )
+    return {
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [{
+            "tool": {"driver": {
+                "name": "audit-repo",
+                "informationUri": "https://github.com/1838904818/audit-repo",
+                "rules": rules,
+            }},
+            "results": results,
+            "properties": {
+                "beforeRoot": result.get("before_root"),
+                "afterRoot": result.get("after_root"),
+                "summary": result["summary"],
+                "notice": "Repository signals require verification and are not confirmed vulnerabilities.",
+            },
+        }],
+    }
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("before", type=Path, help="Earlier JSON snapshot")
     parser.add_argument("after", type=Path, help="Later JSON snapshot")
-    parser.add_argument("--format", choices=("markdown", "json"), default="markdown")
+    parser.add_argument("--format", choices=("markdown", "json", "sarif"), default="markdown")
     parser.add_argument("--output", type=Path, help="Write output to this file instead of stdout")
     parser.add_argument("--fail-on-attention", action="store_true", help="Exit 1 when attention items exist")
     parser.add_argument("--require-comparable", action="store_true", help="Exit 1 when comparison limitations exist")
@@ -571,7 +628,11 @@ def main() -> int:
     except SnapshotError as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
-    output = json.dumps(result, indent=2, ensure_ascii=True) + "\n" if args.format == "json" else to_markdown(result)
+    if args.format == "markdown":
+        output = to_markdown(result)
+    else:
+        rendered = result if args.format == "json" else to_sarif(result)
+        output = json.dumps(rendered, indent=2, ensure_ascii=True) + "\n"
     if args.output:
         try:
             args.output.write_text(output, encoding="utf-8")

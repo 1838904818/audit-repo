@@ -42,9 +42,12 @@ class CheckRepoTests(unittest.TestCase):
             )
             self.assertEqual(second.returncode, 0, second.stderr)
             self.assertTrue(Path(second_dir, "comparison.json").is_file())
+            sarif = json.loads(Path(second_dir, "comparison.sarif").read_text(encoding="utf-8"))
+            self.assertEqual(sarif["version"], "2.1.0")
             outputs = github_output.read_text(encoding="utf-8")
             self.assertIn("attention-count=0\n", outputs)
             self.assertIn("comparable=true\n", outputs)
+            self.assertIn("sarif=", outputs)
 
 
 if __name__ == "__main__":
