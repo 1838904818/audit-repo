@@ -22,6 +22,8 @@ SPEC.loader.exec_module(MODULE)
 def snapshot(**overrides: object) -> dict[str, object]:
     base: dict[str, object] = {
         "schema_version": 1,
+        "tool_version": "1.7.0",
+        "scan_semantics_version": 1,
         "root": "/repo",
         "file_count": 10,
         "scan_mode": "filesystem",
@@ -120,6 +122,27 @@ class CompareRepoSignalsTests(unittest.TestCase):
         older_after = snapshot()
         older_before.pop("scan_file_limit")
         older_after.pop("scan_file_limit")
+        self.assertTrue(MODULE.compare(older_before, older_after)["summary"]["comparable"])
+
+    def test_scan_semantics_provenance_controls_comparability(self) -> None:
+        same = MODULE.compare(snapshot(tool_version="1.7.0"), snapshot(tool_version="1.8.0"))
+        self.assertTrue(same["summary"]["comparable"])
+
+        changed = MODULE.compare(snapshot(), snapshot(scan_semantics_version=2, ci_files=[]))
+        self.assertFalse(changed["summary"]["logical_scope_comparable"])
+        self.assertEqual(changed["attention"], [])
+        self.assertTrue(any("semantics versions differ" in item for item in changed["limitations"]))
+
+        legacy = snapshot()
+        legacy.pop("scan_semantics_version")
+        mixed = MODULE.compare(legacy, snapshot())
+        self.assertFalse(mixed["summary"]["comparable"])
+        self.assertTrue(any("unavailable in one snapshot" in item for item in mixed["limitations"]))
+
+        older_before = snapshot()
+        older_after = snapshot()
+        older_before.pop("scan_semantics_version")
+        older_after.pop("scan_semantics_version")
         self.assertTrue(MODULE.compare(older_before, older_after)["summary"]["comparable"])
 
     def test_different_unreached_scan_limits_do_not_suppress_attention(self) -> None:

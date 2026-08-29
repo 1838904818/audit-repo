@@ -73,6 +73,14 @@ def validate_snapshot(raw: dict[str, Any], path: Path) -> None:
         scan_file_limit = raw["scan_file_limit"]
         if not isinstance(scan_file_limit, int) or isinstance(scan_file_limit, bool) or scan_file_limit < 1:
             raise SnapshotError(f"field 'scan_file_limit' must be a positive integer in {path}")
+    if "tool_version" in raw and (
+        not isinstance(raw["tool_version"], str) or not raw["tool_version"].strip()
+    ):
+        raise SnapshotError(f"field 'tool_version' must be a non-empty string in {path}")
+    if "scan_semantics_version" in raw:
+        semantics_version = raw["scan_semantics_version"]
+        if not isinstance(semantics_version, int) or isinstance(semantics_version, bool) or semantics_version < 1:
+            raise SnapshotError(f"field 'scan_semantics_version' must be a positive integer in {path}")
     if "scan_truncated" in raw and not isinstance(raw["scan_truncated"], bool):
         raise SnapshotError(f"field 'scan_truncated' must be a boolean in {path}")
     if "large_files_complete" in raw and not isinstance(raw["large_files_complete"], bool):
@@ -219,6 +227,16 @@ def scan_scope(data: dict[str, Any]) -> dict[str, Any]:
 
 def logical_scope_limitations(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
     limitations: list[str] = []
+    before_has_semantics = "scan_semantics_version" in before
+    after_has_semantics = "scan_semantics_version" in after
+    if before_has_semantics != after_has_semantics:
+        limitations.append(
+            "The scan semantics version is unavailable in one snapshot, so equivalent logical scope cannot be confirmed."
+        )
+    elif before_has_semantics and before["scan_semantics_version"] != after["scan_semantics_version"]:
+        limitations.append(
+            "The scan semantics versions differ between snapshots, so the logical scan scopes are not equivalent."
+        )
     if sorted(set(before.get("excluded_directory_names", []))) != sorted(
         set(after.get("excluded_directory_names", []))
     ):

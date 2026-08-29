@@ -92,6 +92,8 @@ TOOL_CONFIG_NAMES = {
 }
 LARGE_FILE_BYTES = 5 * 1024 * 1024
 SCHEMA_VERSION = 1
+TOOL_VERSION = "1.7.0"
+SCAN_SEMANTICS_VERSION = 1
 SCAN_MODES = {"filesystem", "git-visible", "tracked"}
 WORK_MARKER_RE = re.compile(r"(?im)(?:#|//|/\*+|<!--|;|--)\s*(TODO|FIXME|HACK|XXX)\b")
 CI_ACTION_RE = re.compile(r"(?m)^\s*-?\s*uses:\s*['\"]?([^'\"#\s]+)")
@@ -551,6 +553,8 @@ def collect(
 
     return {
         "schema_version": SCHEMA_VERSION,
+        "tool_version": TOOL_VERSION,
+        "scan_semantics_version": SCAN_SEMANTICS_VERSION,
         "root": str(root),
         "file_count": len(files),
         "scan_mode": scan_mode,
@@ -642,6 +646,8 @@ def to_markdown(data: dict[str, Any]) -> str:
         "# Repository signals",
         "",
         f"- Root: {markdown_code(data['root'])}",
+        f"- Collector version: {markdown_code(data.get('tool_version', 'Unknown'))}",
+        f"- Scan semantics version: {data.get('scan_semantics_version', 'Unknown')}",
         f"- Files scanned: {data['file_count']}" + (" (limit reached)" if data["scan_truncated"] else ""),
         f"- Scan mode: {markdown_code(data.get('scan_mode', 'filesystem'))}",
         f"- Scope ID: {markdown_code(data['scope_id']) if data.get('scope_id') is not None else 'None'}",

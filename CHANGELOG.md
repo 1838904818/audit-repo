@@ -2,6 +2,18 @@
 
 All notable changes to `audit-repo` are documented here. The project follows semantic versioning.
 
+## [1.7.0] - 2026-08-30
+
+### Added
+
+- Record the collector version and an explicit scan-semantics version in new JSON snapshots and Markdown inventories.
+- Validate scan-provenance metadata and cover compatible, mismatched, mixed legacy, and legacy-only comparisons.
+
+### Changed
+
+- Mark changed or one-sided scan-semantics versions as comparison limitations and suppress scope-dependent alerts that could otherwise be misleading.
+- Keep two legacy snapshots without scan-semantics metadata mutually comparable under the existing legacy rules.
+
 ## [1.6.0] - 2026-08-21
 
 ### Added
@@ -103,6 +115,7 @@ All notable changes to `audit-repo` are documented here. The project follows sem
 
 - First stable release of the Codex Skill, repository signal collector, snapshot comparer, tests, and CI.
 
+[1.7.0]: https://github.com/1838904818/audit-repo/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/1838904818/audit-repo/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/1838904818/audit-repo/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/1838904818/audit-repo/compare/v1.3.0...v1.4.0
