@@ -56,6 +56,12 @@ outputs:
   comparable:
     description: Whether the baseline comparison is directly comparable.
     value: ${{ steps.audit.outputs.comparable }}
+  tool-version:
+    description: Collector version recorded in the generated snapshot.
+    value: ${{ steps.audit.outputs.tool-version }}
+  scan-semantics-version:
+    description: Scan-semantics version recorded in the generated snapshot.
+    value: ${{ steps.audit.outputs.scan-semantics-version }}
 runs:
   using: composite
   steps:

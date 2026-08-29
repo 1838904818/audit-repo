@@ -48,6 +48,9 @@ class CheckRepoTests(unittest.TestCase):
             self.assertIn("attention-count=0\n", outputs)
             self.assertIn("comparable=true\n", outputs)
             self.assertIn("sarif=", outputs)
+            self.assertIn("tool-version=1.8.0\n", outputs)
+            self.assertIn("scan-semantics-version=1\n", outputs)
+            self.assertIn("tool_version=1.8.0\n", second.stdout)
 
 
 if __name__ == "__main__":

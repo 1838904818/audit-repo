@@ -97,6 +97,13 @@ def main() -> int:
     status = run(collect_json)
     if status != 0:
         return status
+    try:
+        snapshot_data = json.loads(snapshot.read_text(encoding="utf-8"))
+        tool_version = str(snapshot_data["tool_version"])
+        scan_semantics_version = str(snapshot_data["scan_semantics_version"])
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError) as error:
+        print(f"error: could not read generated snapshot provenance: {error}", file=sys.stderr)
+        return 2
 
     attention_count = "0"
     comparable = ""
@@ -124,11 +131,6 @@ def main() -> int:
         comparability_failed = args.require_comparable and not result["summary"]["comparable"]
         status = 1 if attention_failed or comparability_failed else 0
     else:
-        try:
-            snapshot_data = json.loads(snapshot.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, ValueError) as error:
-            print(f"error: could not read generated snapshot: {error}", file=sys.stderr)
-            return 2
         if not write_text(report, collector.to_markdown(snapshot_data), "Markdown report"):
             return 2
         status = 0
@@ -141,11 +143,15 @@ def main() -> int:
             "sarif": str(sarif) if args.baseline else "",
             "attention-count": attention_count,
             "comparable": comparable,
+            "tool-version": tool_version,
+            "scan-semantics-version": scan_semantics_version,
         }
         if not write_github_outputs(args.github_output, values):
             return 2
     print(f"snapshot={snapshot}")
     print(f"report={report}")
+    print(f"tool_version={tool_version}")
+    print(f"scan_semantics_version={scan_semantics_version}")
     if args.baseline:
         print(f"comparison={comparison}")
         print(f"sarif={sarif}")
