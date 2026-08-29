@@ -22,7 +22,7 @@ SPEC.loader.exec_module(MODULE)
 def snapshot(**overrides: object) -> dict[str, object]:
     base: dict[str, object] = {
         "schema_version": 1,
-        "tool_version": "1.7.1",
+        "tool_version": "1.7.2",
         "scan_semantics_version": 1,
         "root": "/repo",
         "file_count": 10,
@@ -101,7 +101,7 @@ class CompareRepoSignalsTests(unittest.TestCase):
 
         self.assertEqual(sarif["version"], "2.1.0")
         self.assertEqual(run["tool"]["driver"]["name"], "audit-repo")
-        self.assertEqual(run["properties"]["beforeProvenance"]["tool_version"], "1.7.1")
+        self.assertEqual(run["properties"]["beforeProvenance"]["tool_version"], "1.7.2")
         self.assertEqual(run["properties"]["afterProvenance"]["scan_semantics_version"], 1)
         self.assertEqual({item["ruleId"] for item in rendered}, {"work-markers-increased", "comparison-limitation"})
         self.assertEqual({item["level"] for item in rendered}, {"warning", "note"})
@@ -214,7 +214,7 @@ class CompareRepoSignalsTests(unittest.TestCase):
 
         self.assertIn("Before scope ID: `api`", rendered)
         self.assertIn("After scope ID: `web`", rendered)
-        self.assertIn("Before collector version: `1.7.1`", rendered)
+        self.assertIn("Before collector version: `1.7.2`", rendered)
         self.assertIn("After scan semantics version: `1`", rendered)
         self.assertIn("Before included path globs: `packages/api/*`", rendered)
         self.assertIn("After excluded path globs: `packages/web/generated/*`", rendered)
@@ -367,6 +367,24 @@ class CompareRepoSignalsTests(unittest.TestCase):
                 with self.subTest(scope_id=invalid_scope_id):
                     path.write_text(
                         json.dumps({"schema_version": 1, "scope_id": invalid_scope_id}),
+                        encoding="utf-8",
+                    )
+                    with self.assertRaises(MODULE.SnapshotError):
+                        MODULE.load_snapshot(path)
+
+            for invalid_tool_version in ("", "   ", "line\nfeed", "x" * 101, 1, []):
+                with self.subTest(tool_version=invalid_tool_version):
+                    path.write_text(
+                        json.dumps(snapshot(tool_version=invalid_tool_version)),
+                        encoding="utf-8",
+                    )
+                    with self.assertRaises(MODULE.SnapshotError):
+                        MODULE.load_snapshot(path)
+
+            for invalid_semantics_version in (0, -1, True, "1", None):
+                with self.subTest(scan_semantics_version=invalid_semantics_version):
+                    path.write_text(
+                        json.dumps(snapshot(scan_semantics_version=invalid_semantics_version)),
                         encoding="utf-8",
                     )
                     with self.assertRaises(MODULE.SnapshotError):

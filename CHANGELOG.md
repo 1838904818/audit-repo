@@ -2,6 +2,13 @@
 
 All notable changes to `audit-repo` are documented here. The project follows semantic versioning.
 
+## [1.7.2] - 2026-08-30
+
+### Fixed
+
+- Reject empty, overlong, non-string, and control-character collector-version metadata before it can enter comparison JSON, Markdown, or SARIF.
+- Add malformed provenance regression coverage while retaining valid legacy snapshot compatibility.
+
 ## [1.7.1] - 2026-08-30
 
 ### Changed
@@ -122,6 +129,7 @@ All notable changes to `audit-repo` are documented here. The project follows sem
 
 - First stable release of the Codex Skill, repository signal collector, snapshot comparer, tests, and CI.
 
+[1.7.2]: https://github.com/1838904818/audit-repo/compare/v1.7.1...v1.7.2
 [1.7.1]: https://github.com/1838904818/audit-repo/compare/v1.7.0...v1.7.1
 [1.7.0]: https://github.com/1838904818/audit-repo/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/1838904818/audit-repo/compare/v1.5.0...v1.6.0

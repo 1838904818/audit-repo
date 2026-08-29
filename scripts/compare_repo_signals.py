@@ -73,10 +73,18 @@ def validate_snapshot(raw: dict[str, Any], path: Path) -> None:
         scan_file_limit = raw["scan_file_limit"]
         if not isinstance(scan_file_limit, int) or isinstance(scan_file_limit, bool) or scan_file_limit < 1:
             raise SnapshotError(f"field 'scan_file_limit' must be a positive integer in {path}")
-    if "tool_version" in raw and (
-        not isinstance(raw["tool_version"], str) or not raw["tool_version"].strip()
-    ):
-        raise SnapshotError(f"field 'tool_version' must be a non-empty string in {path}")
+    if "tool_version" in raw:
+        tool_version = raw["tool_version"]
+        if (
+            not isinstance(tool_version, str)
+            or not tool_version.strip()
+            or len(tool_version) > 100
+            or any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in tool_version)
+        ):
+            raise SnapshotError(
+                f"field 'tool_version' must be 1-100 characters with non-whitespace content "
+                f"and no control characters in {path}"
+            )
     if "scan_semantics_version" in raw:
         semantics_version = raw["scan_semantics_version"]
         if not isinstance(semantics_version, int) or isinstance(semantics_version, bool) or semantics_version < 1:
