@@ -22,7 +22,7 @@ SPEC.loader.exec_module(MODULE)
 def snapshot(**overrides: object) -> dict[str, object]:
     base: dict[str, object] = {
         "schema_version": 1,
-        "tool_version": "1.7.0",
+        "tool_version": "1.7.1",
         "scan_semantics_version": 1,
         "root": "/repo",
         "file_count": 10,
@@ -101,6 +101,8 @@ class CompareRepoSignalsTests(unittest.TestCase):
 
         self.assertEqual(sarif["version"], "2.1.0")
         self.assertEqual(run["tool"]["driver"]["name"], "audit-repo")
+        self.assertEqual(run["properties"]["beforeProvenance"]["tool_version"], "1.7.1")
+        self.assertEqual(run["properties"]["afterProvenance"]["scan_semantics_version"], 1)
         self.assertEqual({item["ruleId"] for item in rendered}, {"work-markers-increased", "comparison-limitation"})
         self.assertEqual({item["level"] for item in rendered}, {"warning", "note"})
         self.assertIn("not confirmed vulnerabilities", run["properties"]["notice"])
@@ -212,6 +214,8 @@ class CompareRepoSignalsTests(unittest.TestCase):
 
         self.assertIn("Before scope ID: `api`", rendered)
         self.assertIn("After scope ID: `web`", rendered)
+        self.assertIn("Before collector version: `1.7.1`", rendered)
+        self.assertIn("After scan semantics version: `1`", rendered)
         self.assertIn("Before included path globs: `packages/api/*`", rendered)
         self.assertIn("After excluded path globs: `packages/web/generated/*`", rendered)
 

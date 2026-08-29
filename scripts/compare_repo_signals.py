@@ -448,6 +448,14 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
         "schema_version": 1,
         "before_root": before.get("root"),
         "after_root": after.get("root"),
+        "before_provenance": {
+            "tool_version": before.get("tool_version"),
+            "scan_semantics_version": before.get("scan_semantics_version"),
+        },
+        "after_provenance": {
+            "tool_version": after.get("tool_version"),
+            "scan_semantics_version": after.get("scan_semantics_version"),
+        },
         "before_scan_scope": scan_scope(before),
         "after_scan_scope": scan_scope(after),
         "changes": changes,
@@ -531,11 +539,17 @@ def to_markdown(result: dict[str, Any]) -> str:
     summary = result["summary"]
     before_scope = result.get("before_scan_scope", {})
     after_scope = result.get("after_scan_scope", {})
+    before_provenance = result.get("before_provenance", {})
+    after_provenance = result.get("after_provenance", {})
     lines = [
         "# Repository signal comparison",
         "",
         f"- Before: {markdown_code(result['before_root'] or 'Unknown')}",
         f"- After: {markdown_code(result['after_root'] or 'Unknown')}",
+        f"- Before collector version: {markdown_code(before_provenance.get('tool_version') or 'Unknown')}",
+        f"- After collector version: {markdown_code(after_provenance.get('tool_version') or 'Unknown')}",
+        f"- Before scan semantics version: {markdown_code(before_provenance.get('scan_semantics_version') or 'Unknown')}",
+        f"- After scan semantics version: {markdown_code(after_provenance.get('scan_semantics_version') or 'Unknown')}",
         f"- Before scan mode: {markdown_code(before_scope.get('scan_mode', 'filesystem'))}",
         f"- After scan mode: {markdown_code(after_scope.get('scan_mode', 'filesystem'))}",
         f"- Before scope ID: {markdown_code(before_scope.get('scope_id')) if before_scope.get('scope_id') is not None else 'None'}",
@@ -621,6 +635,8 @@ def to_sarif(result: dict[str, Any]) -> dict[str, Any]:
             "properties": {
                 "beforeRoot": result.get("before_root"),
                 "afterRoot": result.get("after_root"),
+                "beforeProvenance": result.get("before_provenance", {}),
+                "afterProvenance": result.get("after_provenance", {}),
                 "summary": result["summary"],
                 "notice": "Repository signals require verification and are not confirmed vulnerabilities.",
             },

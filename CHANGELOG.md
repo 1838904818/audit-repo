@@ -2,6 +2,13 @@
 
 All notable changes to `audit-repo` are documented here. The project follows semantic versioning.
 
+## [1.7.1] - 2026-08-30
+
+### Changed
+
+- Preserve before/after collector and scan-semantics provenance in comparison JSON, Markdown, and SARIF output.
+- Display provenance directly in human-readable comparison reports so comparability decisions are auditable without reopening source snapshots.
+
 ## [1.7.0] - 2026-08-30
 
 ### Added
@@ -115,6 +122,7 @@ All notable changes to `audit-repo` are documented here. The project follows sem
 
 - First stable release of the Codex Skill, repository signal collector, snapshot comparer, tests, and CI.
 
+[1.7.1]: https://github.com/1838904818/audit-repo/compare/v1.7.0...v1.7.1
 [1.7.0]: https://github.com/1838904818/audit-repo/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/1838904818/audit-repo/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/1838904818/audit-repo/compare/v1.4.0...v1.5.0

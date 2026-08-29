@@ -143,7 +143,7 @@ Comparison exit codes:
 - `1`: a requested policy gate failed: attention items with `--fail-on-attention`, or comparison limits with `--require-comparable`
 - `2`: invalid input or execution error
 
-New JSON snapshots record the collector version, scan-semantics version, mode, logical path scope, configured file limit, scan completeness, and every large file found within the scanned scope. A collector release can change without invalidating comparisons when its scan semantics remain compatible; a changed or one-sided semantics version becomes a comparison limitation and suppresses scope-dependent alerts. Two legacy snapshots without this metadata remain mutually comparable under the older rules. Markdown output displays at most 20 items per long change list and points to JSON for the complete data. A stable non-empty `--scope-id` lets equivalent checkouts at different absolute roots compare safely. When an older snapshot may contain only the legacy top-20 large-file list, the comparer reports a limitation and suppresses unreliable large-file addition/removal alerts.
+New JSON snapshots record the collector version, scan-semantics version, mode, logical path scope, configured file limit, scan completeness, and every large file found within the scanned scope. Comparison JSON, Markdown, and SARIF preserve both snapshots' provenance so compatibility decisions remain visible in every report format. A collector release can change without invalidating comparisons when its scan semantics remain compatible; a changed or one-sided semantics version becomes a comparison limitation and suppresses scope-dependent alerts. Two legacy snapshots without this metadata remain mutually comparable under the older rules. Markdown output displays at most 20 items per long change list and points to JSON for the complete data. A stable non-empty `--scope-id` lets equivalent checkouts at different absolute roots compare safely. When an older snapshot may contain only the legacy top-20 large-file list, the comparer reports a limitation and suppresses unreliable large-file addition/removal alerts.
 
 Run `python scripts/collect_repo_signals.py --help` or `python scripts/compare_repo_signals.py --help` for all options.
 
@@ -152,7 +152,7 @@ Run `python scripts/collect_repo_signals.py --help` or `python scripts/compare_r
 Use the repository directly as a composite Action. Pin a release tag or commit SHA in production workflows:
 
 ```yaml
-- uses: 1838904818/audit-repo@v1.7.0
+- uses: 1838904818/audit-repo@v1.7.1
   id: audit
   with:
     scan-mode: tracked
@@ -165,7 +165,7 @@ The Action requires Python 3.10 or newer on the runner and does not install proj
 For a checked-in baseline, enable both policy gates:
 
 ```yaml
-- uses: 1838904818/audit-repo@v1.7.0
+- uses: 1838904818/audit-repo@v1.7.1
   with:
     baseline: .github/audit-baseline.json
     scan-mode: tracked
