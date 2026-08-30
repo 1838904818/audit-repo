@@ -8,7 +8,7 @@ inputs:
     description: Output directory; blank creates a unique directory under RUNNER_TEMP.
     default: ""
   baseline:
-    description: Optional path to an earlier audit-repo JSON snapshot.
+    description: Optional path to an earlier audit-repo JSON snapshot; required by either policy gate.
     default: ""
   scan-mode:
     description: filesystem, git-visible, or tracked.
@@ -32,10 +32,10 @@ inputs:
     description: Large-file threshold in MiB.
     default: "5"
   fail-on-attention:
-    description: Return a failing status when comparison attention items exist.
+    description: Return a failing status when comparison attention items exist; accepts exactly true or false, and true requires baseline.
     default: "false"
   require-comparable:
-    description: Return a failing status when the baseline is not directly comparable.
+    description: Return a failing status when the baseline is not directly comparable; accepts exactly true or false, and true requires baseline.
     default: "false"
 outputs:
   snapshot:
@@ -81,6 +81,24 @@ runs:
         AUDIT_FAIL_ON_ATTENTION: ${{ inputs.fail-on-attention }}
         AUDIT_REQUIRE_COMPARABLE: ${{ inputs.require-comparable }}
       run: |
+        validate_boolean() {
+          local name="$1"
+          local value="$2"
+          case "$value" in
+            true|false) return 0 ;;
+            *)
+              echo "::error title=Invalid input::$name must be exactly true or false"
+              return 2
+              ;;
+          esac
+        }
+        validate_boolean "fail-on-attention" "$AUDIT_FAIL_ON_ATTENTION" || exit 2
+        validate_boolean "require-comparable" "$AUDIT_REQUIRE_COMPARABLE" || exit 2
+        if [[ -z "$AUDIT_BASELINE" ]] && \
+            { [[ "$AUDIT_FAIL_ON_ATTENTION" == "true" ]] || [[ "$AUDIT_REQUIRE_COMPARABLE" == "true" ]]; }; then
+          echo "::error title=Missing baseline::A comparison gate requires a non-empty baseline"
+          exit 2
+        fi
         if [[ -z "$AUDIT_OUTPUT_DIR" ]]; then
           AUDIT_OUTPUT_DIR="$(python -I -c 'import os, tempfile; print(tempfile.mkdtemp(prefix="audit-repo-", dir=os.environ["RUNNER_TEMP"]))')"
         fi

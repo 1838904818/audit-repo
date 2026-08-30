@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import stat
 import subprocess
 import sys
 import uuid
@@ -35,8 +36,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--exclude-dir", action="append", default=[], metavar="NAME")
     parser.add_argument("--max-files", type=int, default=50_000)
     parser.add_argument("--large-file-mib", type=float, default=5.0)
-    parser.add_argument("--fail-on-attention", action="store_true")
-    parser.add_argument("--require-comparable", action="store_true")
+    parser.add_argument("--fail-on-attention", action="store_true", help="Fail on attention items; requires --baseline")
+    parser.add_argument("--require-comparable", action="store_true", help="Fail when incomparable; requires --baseline")
     parser.add_argument("--github-output", type=Path, help=argparse.SUPPRESS)
     return parser.parse_args()
 
@@ -90,6 +91,21 @@ def paths_alias(first: Path, second: Path) -> bool:
 
 
 def clear_managed_outputs(paths: tuple[Path, ...]) -> bool:
+    for path in paths:
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            continue
+        except (OSError, UnicodeError) as error:
+            print(f"error: could not inspect stale generated output {path}: {error}", file=sys.stderr)
+            return False
+        if stat.S_ISDIR(metadata.st_mode):
+            print(
+                f"error: could not remove stale generated output {path}: managed output path is a directory",
+                file=sys.stderr,
+            )
+            return False
+
     success = True
     for path in paths:
         try:
@@ -126,33 +142,55 @@ def path_is_within(path: Path, directory: Path) -> bool:
     return True
 
 
-def repository_output_symlink(repository: Path, output_candidate: Path) -> Path | None:
-    current = Path(output_candidate.anchor)
-    resolved_parent = current.resolve()
+def repository_output_redirect(untrusted_boundaries: tuple[Path, ...], output_candidate: Path) -> Path | None:
+    resolved_parent = Path(output_candidate.anchor).resolve()
     for part in output_candidate.parts[1:]:
-        parent_is_in_repository = path_is_within(resolved_parent, repository)
-        current /= part
-        if parent_is_in_repository and current.is_symlink():
-            return current
-        resolved_parent = current.resolve(strict=False)
+        if part == "..":
+            resolved_parent = resolved_parent.parent
+            continue
+        parent_is_untrusted = any(
+            path_is_within(resolved_parent, boundary)
+            for boundary in untrusted_boundaries
+        )
+        next_path = resolved_parent / part
+        if parent_is_untrusted and collector.path_is_link_or_reparse_point(next_path):
+            return next_path
+        resolved_parent = next_path.resolve(strict=False)
     return None
 
 
 def main() -> int:
     args = parse_args()
+    enabled_gates = [
+        option
+        for enabled, option in (
+            (args.fail_on_attention, "--fail-on-attention"),
+            (args.require_comparable, "--require-comparable"),
+        )
+        if enabled
+    ]
+    if enabled_gates and args.baseline is None:
+        print(f"error: enabling {', '.join(enabled_gates)} requires --baseline", file=sys.stderr)
+        return 2
     try:
         repository_candidate = absolute_without_symlink_resolution(Path(args.path))
         repository = repository_candidate.resolve()
+        untrusted_output_boundaries = tuple({
+            repository,
+            collector.git_worktree_boundary(repository_candidate),
+            collector.git_worktree_boundary(repository),
+        })
         output_candidate = absolute_without_symlink_resolution(args.output_dir)
-        unsafe_output_component = repository_output_symlink(repository, output_candidate)
+        unsafe_output_component = repository_output_redirect(untrusted_output_boundaries, output_candidate)
         if unsafe_output_component is not None:
             print(
-                "error: output directory must not traverse a symbolic link inside the repository",
+                "error: output directory must not traverse a symbolic link or reparse point inside the repository or containing Git worktree",
                 file=sys.stderr,
             )
             return 2
         output_dir = output_candidate.resolve()
         baseline = args.baseline.expanduser().resolve() if args.baseline else None
+        github_output = args.github_output.expanduser().resolve() if args.github_output else None
     except (OSError, RuntimeError, ValueError) as error:
         print(f"error: could not resolve an input path: {error}", file=sys.stderr)
         return 2
@@ -173,6 +211,27 @@ def main() -> int:
             return 2
         if baseline_aliases_output:
             print("error: baseline must not alias any generated output", file=sys.stderr)
+            return 2
+    if github_output is not None:
+        try:
+            github_output_aliases_generated = any(
+                paths_alias(github_output, generated)
+                for generated in generated_outputs
+            )
+        except OSError as error:
+            print(f"error: could not verify GitHub output isolation: {error}", file=sys.stderr)
+            return 2
+        if github_output_aliases_generated:
+            print("error: GitHub output must not alias any generated output", file=sys.stderr)
+            return 2
+    if baseline is not None and github_output is not None:
+        try:
+            baseline_aliases_github_output = paths_alias(baseline, github_output)
+        except OSError as error:
+            print(f"error: could not verify baseline and GitHub output isolation: {error}", file=sys.stderr)
+            return 2
+        if baseline_aliases_github_output:
+            print("error: GitHub output must not alias the baseline", file=sys.stderr)
             return 2
     try:
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -233,7 +292,7 @@ def main() -> int:
             return 2
         status = 0
 
-    if args.github_output:
+    if github_output is not None:
         values = {
             "snapshot": str(snapshot),
             "report": str(report),
@@ -244,7 +303,7 @@ def main() -> int:
             "tool-version": tool_version,
             "scan-semantics-version": scan_semantics_version,
         }
-        if not write_github_outputs(args.github_output, values):
+        if not write_github_outputs(github_output, values):
             return 2
     print(f"snapshot={snapshot}")
     print(f"report={report}")

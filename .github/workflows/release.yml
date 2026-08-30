@@ -8,9 +8,73 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: release-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  provenance:
+    name: Verify tag provenance
+    runs-on: ubuntu-latest
+    outputs:
+      tag-ref-object-sha: ${{ steps.provenance.outputs.tag-ref-object-sha }}
+    permissions:
+      contents: read
+    steps:
+      - name: Require a default-branch commit before running repository code
+        id: provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_TAG: ${{ github.ref_name }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          TAG_PATH="$(python -I -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "${EXPECTED_TAG}")"
+          REF_JSON="${RUNNER_TEMP}/tag-ref.json"
+          gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG_PATH}" > "${REF_JSON}"
+
+          read -r OBJECT_TYPE OBJECT_SHA < <(
+            python -I -c 'import json, re, sys; obj=json.load(open(sys.argv[1], encoding="utf-8")).get("object"); assert isinstance(obj, dict); kind=obj.get("type"); sha=obj.get("sha"); assert kind in {"commit", "tag"} and isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{40}", sha); print(kind, sha)' "${REF_JSON}"
+          )
+          TAG_REF_OBJECT_SHA="${OBJECT_SHA}"
+          DEPTH=0
+          while [[ "${OBJECT_TYPE}" == "tag" ]]; do
+            ((DEPTH += 1))
+            if (( DEPTH > 16 )); then
+              echo "Tag dereference depth exceeded the safety limit." >&2
+              exit 1
+            fi
+            TAG_JSON="${RUNNER_TEMP}/tag-object-${DEPTH}.json"
+            gh api "repos/${GITHUB_REPOSITORY}/git/tags/${OBJECT_SHA}" > "${TAG_JSON}"
+            read -r OBJECT_TYPE OBJECT_SHA < <(
+              python -I -c 'import json, re, sys; obj=json.load(open(sys.argv[1], encoding="utf-8")).get("object"); assert isinstance(obj, dict); kind=obj.get("type"); sha=obj.get("sha"); assert kind in {"commit", "tag"} and isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{40}", sha); print(kind, sha)' "${TAG_JSON}"
+            )
+          done
+          if [[ "${OBJECT_TYPE}" != "commit" || "${OBJECT_SHA}" != "${EXPECTED_SHA}" ]]; then
+            echo "Remote tag resolves to ${OBJECT_TYPE} ${OBJECT_SHA}, expected commit ${EXPECTED_SHA}." >&2
+            exit 1
+          fi
+
+          REPOSITORY_JSON="${RUNNER_TEMP}/repository.json"
+          gh api "repos/${GITHUB_REPOSITORY}" > "${REPOSITORY_JSON}"
+          DEFAULT_BRANCH="$(python -I -c 'import json, sys; value=json.load(open(sys.argv[1], encoding="utf-8")).get("default_branch"); assert isinstance(value, str) and value; print(value)' "${REPOSITORY_JSON}")"
+          DEFAULT_BRANCH_PATH="$(python -I -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "${DEFAULT_BRANCH}")"
+          DEFAULT_REF_JSON="${RUNNER_TEMP}/default-ref.json"
+          gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${DEFAULT_BRANCH_PATH}" > "${DEFAULT_REF_JSON}"
+          DEFAULT_SHA="$(python -I -c 'import json, re, sys; obj=json.load(open(sys.argv[1], encoding="utf-8")).get("object"); assert isinstance(obj, dict) and obj.get("type") == "commit"; sha=obj.get("sha"); assert isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{40}", sha); print(sha)' "${DEFAULT_REF_JSON}")"
+
+          COMPARE_JSON="${RUNNER_TEMP}/compare.json"
+          gh api "repos/${GITHUB_REPOSITORY}/compare/${EXPECTED_SHA}...${DEFAULT_SHA}" > "${COMPARE_JSON}"
+          COMPARE_STATUS="$(python -I -c 'import json, sys; value=json.load(open(sys.argv[1], encoding="utf-8")).get("status"); assert isinstance(value, str); print(value)' "${COMPARE_JSON}")"
+          if [[ "${COMPARE_STATUS}" != "identical" && "${COMPARE_STATUS}" != "ahead" ]]; then
+            echo "Release commit ${EXPECTED_SHA} is not merged into default branch ${DEFAULT_BRANCH} (compare status: ${COMPARE_STATUS})." >&2
+            exit 1
+          fi
+          printf 'tag-ref-object-sha=%s\n' "${TAG_REF_OBJECT_SHA}" >> "${GITHUB_OUTPUT}"
+
   verify:
     name: Verify ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    needs: provenance
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -60,31 +124,160 @@ jobs:
 
   publish:
     name: Publish GitHub Release
-    needs: package
+    needs:
+      - package
+      - provenance
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - name: Revalidate release ref before publishing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_TAG: ${{ github.ref_name }}
+          EXPECTED_TAG_OBJECT_SHA: ${{ needs.provenance.outputs.tag-ref-object-sha }}
+        run: |
+          set -euo pipefail
+          TAG_PATH="$(python -I -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "${EXPECTED_TAG}")"
+          TAG_OBJECT_SHA="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG_PATH}" --jq .object.sha)"
+          if [[ "${TAG_OBJECT_SHA}" != "${EXPECTED_TAG_OBJECT_SHA}" ]]; then
+            echo "Remote tag object moved to ${TAG_OBJECT_SHA}; expected ${EXPECTED_TAG_OBJECT_SHA}." >&2
+            exit 1
+          fi
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: release-assets
           path: dist
-      - name: Create release with verified assets
+      - name: Create release or preserve existing release
         env:
           GH_TOKEN: ${{ github.token }}
+          EXPECTED_TAG: ${{ github.ref_name }}
         run: |
-          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            mkdir existing-release
-            gh release download "${GITHUB_REF_NAME}" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --pattern "audit-repo-${GITHUB_REF_NAME}.zip*" \
-              --dir existing-release
-            cmp "dist/audit-repo-${GITHUB_REF_NAME}.zip" "existing-release/audit-repo-${GITHUB_REF_NAME}.zip"
-            cmp "dist/audit-repo-${GITHUB_REF_NAME}.zip.sha256" "existing-release/audit-repo-${GITHUB_REF_NAME}.zip.sha256"
-          else
-            gh release create "${GITHUB_REF_NAME}" dist/* \
+          set -euo pipefail
+          RELEASES_JSON="${RUNNER_TEMP}/releases-before-create.json"
+          gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/releases?per_page=100" > "${RELEASES_JSON}"
+          RELEASE_STATE="$(python -I - "${RELEASES_JSON}" <<'PY'
+          import json
+          import os
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              pages = json.load(stream)
+          if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
+              raise SystemExit("Release inventory is not a paginated list")
+          expected_tag = os.environ["EXPECTED_TAG"]
+          matches = [
+              release
+              for page in pages
+              for release in page
+              if isinstance(release, dict) and release.get("tag_name") == expected_tag
+          ]
+          if len(matches) > 1:
+              raise SystemExit(f"Multiple Releases name tag {expected_tag!r}; refusing to mutate either")
+          if not matches:
+              print("absent")
+          elif matches[0].get("draft") is True:
+              raise SystemExit(f"A draft Release already exists for tag {expected_tag!r}; refusing to mutate it")
+          elif matches[0].get("draft") is False:
+              print("existing")
+          else:
+              raise SystemExit(f"Release state for tag {expected_tag!r} is invalid")
+          PY
+          )"
+          if [[ "${RELEASE_STATE}" == "existing" ]]; then
+            echo "Existing release found; leaving it unchanged."
+          elif [[ "${RELEASE_STATE}" == "absent" ]]; then
+            gh release create "${GITHUB_REF_NAME}" \
+              "dist/audit-repo-${GITHUB_REF_NAME}.zip" \
+              "dist/audit-repo-${GITHUB_REF_NAME}.zip.sha256" \
               --repo "${GITHUB_REPOSITORY}" \
               --verify-tag \
+              --target "${GITHUB_SHA}" \
               --generate-notes \
               --title "audit-repo ${GITHUB_REF_NAME}"
+          else
+            echo "Unexpected release inventory state: ${RELEASE_STATE}" >&2
+            exit 1
+          fi
+      - name: Verify release state and exact assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          EXPECTED_ZIP="audit-repo-${EXPECTED_TAG}.zip"
+          EXPECTED_CHECKSUM="${EXPECTED_ZIP}.sha256"
+          RELEASE_JSON="${RUNNER_TEMP}/release.json"
+          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${EXPECTED_TAG}" > "${RELEASE_JSON}"
+          EXPECTED_ZIP="${EXPECTED_ZIP}" EXPECTED_CHECKSUM="${EXPECTED_CHECKSUM}" \
+            python -I - "${RELEASE_JSON}" <<'PY'
+          import json
+          import os
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              release = json.load(stream)
+
+          expected_tag = os.environ["EXPECTED_TAG"]
+          expected_assets = {os.environ["EXPECTED_ZIP"], os.environ["EXPECTED_CHECKSUM"]}
+          errors = []
+          if release.get("tag_name") != expected_tag:
+              errors.append(f"tagName is {release.get('tag_name')!r}, expected {expected_tag!r}")
+          if release.get("draft") is not False:
+              errors.append("release is a draft")
+          if release.get("prerelease") is not False:
+              errors.append("release is a prerelease")
+          target_commitish = release.get("target_commitish")
+          if not isinstance(target_commitish, str) or not target_commitish:
+              errors.append("targetCommitish is missing")
+
+          assets = release.get("assets")
+          if not isinstance(assets, list):
+              errors.append("assets is not a list")
+              assets = []
+          names = [asset.get("name") for asset in assets if isinstance(asset, dict)]
+          if len(names) != 2 or set(names) != expected_assets:
+              errors.append(f"asset names are {names!r}, expected exactly {sorted(expected_assets)!r}")
+          for asset in assets:
+              if not isinstance(asset, dict) or asset.get("state") != "uploaded":
+                  errors.append(f"asset is not uploaded: {asset!r}")
+
+          if errors:
+              raise SystemExit("Release verification failed:\n- " + "\n- ".join(errors))
+          PY
+
+          mkdir -p "${RUNNER_TEMP}/existing-release"
+          gh release download "${EXPECTED_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "${EXPECTED_ZIP}" \
+            --dir "${RUNNER_TEMP}/existing-release"
+          gh release download "${EXPECTED_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "${EXPECTED_CHECKSUM}" \
+            --dir "${RUNNER_TEMP}/existing-release"
+          cmp "dist/${EXPECTED_ZIP}" "${RUNNER_TEMP}/existing-release/${EXPECTED_ZIP}"
+          cmp "dist/${EXPECTED_CHECKSUM}" "${RUNNER_TEMP}/existing-release/${EXPECTED_CHECKSUM}"
+      - name: Revalidate release provenance after asset verification
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_TAG: ${{ github.ref_name }}
+          EXPECTED_SHA: ${{ github.sha }}
+          EXPECTED_TAG_OBJECT_SHA: ${{ needs.provenance.outputs.tag-ref-object-sha }}
+        run: |
+          set -euo pipefail
+          TAG_PATH="$(python -I -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "${EXPECTED_TAG}")"
+          TAG_OBJECT_SHA="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG_PATH}" --jq .object.sha)"
+          if [[ "${TAG_OBJECT_SHA}" != "${EXPECTED_TAG_OBJECT_SHA}" ]]; then
+            echo "Remote tag object moved to ${TAG_OBJECT_SHA}; expected ${EXPECTED_TAG_OBJECT_SHA}." >&2
+            exit 1
+          fi
+
+          DEFAULT_BRANCH="$(gh api "repos/${GITHUB_REPOSITORY}" --jq .default_branch)"
+          DEFAULT_BRANCH_PATH="$(python -I -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "${DEFAULT_BRANCH}")"
+          DEFAULT_SHA="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${DEFAULT_BRANCH_PATH}" --jq .object.sha)"
+          COMPARE_STATUS="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${EXPECTED_SHA}...${DEFAULT_SHA}" --jq .status)"
+          if [[ "${COMPARE_STATUS}" != "identical" && "${COMPARE_STATUS}" != "ahead" ]]; then
+            echo "Release commit ${EXPECTED_SHA} is no longer reachable from default branch ${DEFAULT_BRANCH}." >&2
+            exit 1
           fi

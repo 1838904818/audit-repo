@@ -29,7 +29,7 @@ The easiest option in Codex is to ask the built-in installer to install this rep
 Use $skill-installer to install https://github.com/1838904818/audit-repo.
 ```
 
-For an offline or version-pinned installation, download the `.zip` and matching `.sha256` file from the [latest release](https://github.com/1838904818/audit-repo/releases/latest). Verify the checksum, then extract the archive's top-level `audit-repo` directory into `$HOME/.agents/skills`. Release assets are built only after the full test matrix passes on Linux, Windows, and macOS with Python 3.10 and 3.14.
+For an offline or version-pinned installation, download the `.zip` and matching `.sha256` file from the [latest release](https://github.com/1838904818/audit-repo/releases/latest). Verify the checksum, then extract the archive's top-level `audit-repo` directory into `$HOME/.agents/skills`. Release assets are built only after the full test matrix passes on Linux, Windows, and macOS with Python 3.10 and 3.14. Before repository code runs, publishing verifies that the remote tag resolves to the workflow event commit on the default branch. It then verifies that the Release is stable and its exact two-asset set matches the current deterministic build, and rechecks tag/default-branch provenance after the online assets match. A run that finds an existing published Release leaves it unchanged and verifies it; an existing draft fails closed without being edited or deleted.
 
 For a manual user-wide installation, clone the repository into the official local skills directory. See the [OpenAI Build skills documentation](https://learn.chatgpt.com/docs/build-skills) for current locations and invocation methods.
 
@@ -110,6 +110,8 @@ Scope IDs are unset by default and do not change which files are scanned. They a
 
 v1.9.0 also advances scan semantics to version 2. Snapshots created by v1.8.x therefore produce a deliberate comparison limitation even at the same root; review the new classification rules and regenerate approved baselines before restoring a comparability gate.
 
+v1.9.1 advances scan semantics to version 3 because Windows junction and reparse-point traversal is now excluded consistently with symbolic links. A v1.9.0 baseline therefore produces a deliberate limitation; review the boundary change and regenerate the approved baseline before restoring `--require-comparable`.
+
 Manifest and lockfile inventory uses canonical, case-sensitive filenames so a snapshot does not claim that an ecosystem tool will consume a mis-cased file on a case-sensitive platform. The inventory includes SwiftPM version-specific manifests and NuGet project-specific lockfiles. GitHub Action references are lexical workflow signals: script and description block contents are excluded, while an unambiguous single-line block value attached to `uses` is recognized.
 
 Compare two snapshots:
@@ -128,9 +130,9 @@ python scripts/check_repo.py /path/to/repo \
   --fail-on-attention --require-comparable
 ```
 
-Before each run, the runner removes only those four managed output paths so reused directories cannot expose stale reports. It preserves every other entry and fails with exit code `2` instead of recursively deleting a managed-path directory collision.
+Before each run, the runner removes only those four managed output paths so reused directories cannot expose stale reports. It preflights all four paths, preserves every other entry, and fails with exit code `2` without deleting any sibling artifact when a managed path is a directory. Enabling either comparison gate without `--baseline` is also an invalid configuration and fails before the output directory or managed artifacts are changed.
 
-The runner also refuses an output directory that traverses a symbolic link inside the repository, preventing an untrusted checkout from redirecting managed writes outside its tree.
+The runner also refuses an output directory that traverses a symbolic link or Windows reparse point (including an NTFS junction) anywhere inside the scanned repository or its containing Git worktree. This includes monorepo siblings when only a subdirectory is scanned, preventing an untrusted checkout from redirecting managed writes outside its tree. In Action mode, the GitHub output file must not equal or alias the baseline or any managed artifact.
 
 Git-aware collection resolves Git to an absolute executable found in an absolute `PATH` directory outside the entire containing Git worktree, including when only a monorepo subdirectory is scanned. Both the lexical scan entry and its resolved target define untrusted boundaries, and containment is verified by filesystem identity as well as path spelling. Repository-contained symlinks or case variants on case-insensitive volumes therefore cannot hide a checkout-local executable. The collector never relies on current-directory executable lookup, so a checkout-local `git.exe` cannot turn a static Windows audit into code execution. Worktree cleanliness is intentionally reported as `unknown` so the inventory does not invoke broader repository-aware status machinery.
 
@@ -164,7 +166,7 @@ Run `python scripts/collect_repo_signals.py --help` or `python scripts/compare_r
 Use the repository directly as a composite Action. Pin a release tag or commit SHA in production workflows:
 
 ```yaml
-- uses: 1838904818/audit-repo@v1.9.0
+- uses: 1838904818/audit-repo@v1.9.1
   id: audit
   with:
     scan-mode: tracked
@@ -177,7 +179,7 @@ The Action requires Python 3.10 or newer on the runner and does not install proj
 For a checked-in baseline, enable both policy gates:
 
 ```yaml
-- uses: 1838904818/audit-repo@v1.9.0
+- uses: 1838904818/audit-repo@v1.9.1
   with:
     baseline: .github/audit-baseline.json
     scan-mode: tracked
@@ -188,7 +190,7 @@ For a checked-in baseline, enable both policy gates:
     require-comparable: "true"
 ```
 
-`include-paths`, `exclude-paths`, and `exclude-dirs` accept newline-separated values. Create the approved baseline with the same exclusions so the baseline file does not become part of its own comparison scope. A run without `baseline` is collection-only, so comparison gates do not apply.
+`include-paths`, `exclude-paths`, and `exclude-dirs` accept newline-separated values. Create the approved baseline with the same exclusions so the baseline file does not become part of its own comparison scope. Policy inputs accept only the exact strings `true` and `false`. Leave both gates false for a collection-only run: enabling either gate without `baseline`, or supplying another boolean spelling, is rejected as invalid configuration instead of silently disabling policy.
 
 Snapshots are not authenticated. In a `pull_request` workflow, do not use a baseline loaded from the untrusted pull-request checkout as an independent security gate: a contributor could change both the repository and that baseline. Load the approved baseline from a protected base ref or trusted artifact, verify its provenance, and then compare it with the pull-request snapshot.
 
@@ -250,12 +252,12 @@ python -m unittest discover -s scripts -p "test_*.py"
 Build the same deterministic assets used by GitHub Releases:
 
 ```bash
-python scripts/package_skill.py --version v1.9.0 --output-dir dist
+python scripts/package_skill.py --version v1.9.1 --output-dir dist
 ```
 
 The requested package version must match `TOOL_VERSION` in `scripts/collect_repo_signals.py`.
 
-CI exercises Markdown output, JSON output, snapshot comparison, repository contracts, the composite Action, and deterministic packaging. Python 3.10 and 3.14 run on Linux, Windows, and macOS; Python 3.11 through 3.13 also run on Linux. Release tags verify the minimum and latest versions on all three operating systems before publishing assets.
+CI exercises Markdown output, JSON output, snapshot comparison, repository contracts, the composite Action, and deterministic packaging. Python 3.10 and 3.14 run on Linux, Windows, and macOS; Python 3.11 through 3.13 also run on Linux. A separate three-platform Action policy matrix verifies successful baseline gates and fail-closed attention, comparability, configuration, and collision paths. Release tags verify the minimum and latest versions on all three operating systems before publishing assets.
 
 ## License
 

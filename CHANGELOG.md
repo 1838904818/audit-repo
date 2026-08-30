@@ -2,6 +2,28 @@
 
 All notable changes to `audit-repo` are documented here. The project follows semantic versioning.
 
+## [1.9.1] - 2026-08-31
+
+### Added
+
+- Exercise successful and rejected composite-Action policy paths on Linux, Windows, and macOS, including SARIF, comparison limitations, sensitive-file attention, invalid configuration, and output collisions.
+
+### Changed
+
+- Advance scan semantics to version 3 because Windows junction/reparse-point traversal could previously include files outside the intended repository root.
+- Accept only exact `true` or `false` policy input values in the composite Action and reject enabled comparison gates when no baseline is supplied.
+- Require a release tag to resolve to the workflow event commit on the default branch before repository code runs, then verify the published Release is stable, still names that tag, and contains exactly the two expected assets.
+- Re-download and compare both online assets after either creating or reusing a Release, then recheck tag/default-branch provenance; a run that finds an existing published Release is verification-only, while an existing draft fails closed without mutation.
+
+### Fixed
+
+- Reject a GitHub output file that aliases the baseline or any managed audit artifact before stale outputs are removed.
+- Preflight all four managed output paths so a directory collision fails without partially deleting other stale artifacts.
+- Treat symbolic links and Windows reparse points, including NTFS junctions on Python 3.10 and 3.11, as output-path redirects across the scanned root and its entire containing Git worktree, including monorepo siblings.
+- Replace broad release asset globs with explicit archive and checksum paths, preventing ambiguous extra assets from passing release verification.
+
+Because traversal coverage changed, v1.9.0 baselines are intentionally not directly comparable with v1.9.1 snapshots. Review the reparse-point boundary and regenerate approved baselines before restoring a comparability gate.
+
 ## [1.9.0] - 2026-08-31
 
 ### Added
@@ -181,6 +203,7 @@ Because file classification changed, snapshots created before v1.9.0 have a diff
 
 - First stable release of the Codex Skill, repository signal collector, snapshot comparer, tests, and CI.
 
+[1.9.1]: https://github.com/1838904818/audit-repo/compare/v1.9.0...v1.9.1
 [1.9.0]: https://github.com/1838904818/audit-repo/compare/v1.8.2...v1.9.0
 [1.8.2]: https://github.com/1838904818/audit-repo/compare/v1.8.1...v1.8.2
 [1.8.1]: https://github.com/1838904818/audit-repo/compare/v1.8.0...v1.8.1

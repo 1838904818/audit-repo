@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -55,9 +56,35 @@ class CheckRepoTests(unittest.TestCase):
             self.assertIn("attention-count=0\n", outputs)
             self.assertIn("comparable=true\n", outputs)
             self.assertIn("sarif=", outputs)
-            self.assertIn("tool-version=1.9.0\n", outputs)
-            self.assertIn("scan-semantics-version=2\n", outputs)
-            self.assertIn("tool_version=1.9.0\n", second.stdout)
+            self.assertIn("tool-version=1.9.1\n", outputs)
+            self.assertIn("scan-semantics-version=3\n", outputs)
+            self.assertIn("tool_version=1.9.1\n", second.stdout)
+
+    def test_comparison_gates_require_baseline_before_output_cleanup(self) -> None:
+        gate_combinations = (
+            ("--fail-on-attention",),
+            ("--require-comparable",),
+            ("--fail-on-attention", "--require-comparable"),
+        )
+        for gates in gate_combinations:
+            with self.subTest(gates=gates), tempfile.TemporaryDirectory() as repository_dir, \
+                    tempfile.TemporaryDirectory() as output_dir:
+                Path(repository_dir, "README.md").write_text("# Example\n", encoding="utf-8")
+                sentinels = {
+                    name: f"preserve {name}\n"
+                    for name in ("snapshot.json", "report.md", "comparison.json", "comparison.sarif")
+                }
+                for name, content in sentinels.items():
+                    Path(output_dir, name).write_text(content, encoding="utf-8")
+
+                result = self.run_check(
+                    repository_dir, "--scan-mode", "filesystem", "--output-dir", output_dir, *gates,
+                )
+
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("requires --baseline", result.stderr)
+                for name, content in sentinels.items():
+                    self.assertEqual(Path(output_dir, name).read_text(encoding="utf-8"), content)
 
     def test_github_outputs_use_multiline_records_for_untrusted_newlines(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -127,6 +154,95 @@ class CheckRepoTests(unittest.TestCase):
             self.assertIn("baseline must not alias any generated output", second.stderr)
             self.assertEqual(baseline.read_bytes(), original)
 
+    def test_rejects_github_output_that_is_any_generated_output(self) -> None:
+        for output_name in ("snapshot.json", "report.md", "comparison.json", "comparison.sarif"):
+            with self.subTest(output_name=output_name), tempfile.TemporaryDirectory() as repository_dir, \
+                    tempfile.TemporaryDirectory() as output_dir:
+                Path(repository_dir, "README.md").write_text("# Example\n", encoding="utf-8")
+                github_output = Path(output_dir, output_name)
+                github_output.write_text("preserve me\n", encoding="utf-8")
+
+                result = self.run_check(
+                    repository_dir, "--scan-mode", "filesystem", "--output-dir", output_dir,
+                    "--github-output", str(github_output),
+                )
+
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("GitHub output must not alias any generated output", result.stderr)
+                self.assertEqual(github_output.read_text(encoding="utf-8"), "preserve me\n")
+
+    def test_rejects_hard_link_alias_for_github_output(self) -> None:
+        with tempfile.TemporaryDirectory() as repository_dir, tempfile.TemporaryDirectory() as output_dir, \
+                tempfile.TemporaryDirectory() as github_dir:
+            Path(repository_dir, "README.md").write_text("# Example\n", encoding="utf-8")
+            generated = Path(output_dir, "snapshot.json")
+            generated.write_text("preserve me\n", encoding="utf-8")
+            github_output = Path(github_dir, "github-output.txt")
+            try:
+                os.link(generated, github_output)
+            except OSError as error:
+                self.skipTest(f"hard links unavailable: {error}")
+
+            result = self.run_check(
+                repository_dir, "--scan-mode", "filesystem", "--output-dir", output_dir,
+                "--github-output", str(github_output),
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("GitHub output must not alias any generated output", result.stderr)
+            self.assertEqual(generated.read_text(encoding="utf-8"), "preserve me\n")
+            self.assertEqual(github_output.read_text(encoding="utf-8"), "preserve me\n")
+
+    def test_rejects_baseline_that_is_the_github_output(self) -> None:
+        with tempfile.TemporaryDirectory() as repository_dir, tempfile.TemporaryDirectory() as baseline_dir, \
+                tempfile.TemporaryDirectory() as output_dir:
+            Path(repository_dir, "README.md").write_text("# Example\n", encoding="utf-8")
+            first = self.run_check(
+                repository_dir, "--scan-mode", "filesystem", "--scope-id", "test", "--output-dir", baseline_dir,
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+            baseline = Path(baseline_dir, "snapshot.json")
+            original = baseline.read_bytes()
+
+            result = self.run_check(
+                repository_dir, "--scan-mode", "filesystem", "--scope-id", "test",
+                "--output-dir", output_dir, "--baseline", str(baseline),
+                "--github-output", str(baseline),
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("GitHub output must not alias the baseline", result.stderr)
+            self.assertEqual(baseline.read_bytes(), original)
+            self.assertEqual(list(Path(output_dir).iterdir()), [])
+
+    def test_rejects_hard_link_alias_between_baseline_and_github_output(self) -> None:
+        with tempfile.TemporaryDirectory() as repository_dir, tempfile.TemporaryDirectory() as baseline_dir, \
+                tempfile.TemporaryDirectory() as output_dir, tempfile.TemporaryDirectory() as github_dir:
+            Path(repository_dir, "README.md").write_text("# Example\n", encoding="utf-8")
+            first = self.run_check(
+                repository_dir, "--scan-mode", "filesystem", "--scope-id", "test", "--output-dir", baseline_dir,
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+            baseline = Path(baseline_dir, "snapshot.json")
+            github_output = Path(github_dir, "github-output.txt")
+            try:
+                os.link(baseline, github_output)
+            except OSError as error:
+                self.skipTest(f"hard links unavailable: {error}")
+            original = baseline.read_bytes()
+
+            result = self.run_check(
+                repository_dir, "--scan-mode", "filesystem", "--scope-id", "test",
+                "--output-dir", output_dir, "--baseline", str(baseline),
+                "--github-output", str(github_output),
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("GitHub output must not alias the baseline", result.stderr)
+            self.assertEqual(baseline.read_bytes(), original)
+            self.assertEqual(github_output.read_bytes(), original)
+            self.assertEqual(list(Path(output_dir).iterdir()), [])
+
     def test_reused_output_dir_removes_stale_comparison_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as repository_dir, tempfile.TemporaryDirectory() as baseline_dir, \
                 tempfile.TemporaryDirectory() as output_dir:
@@ -187,6 +303,13 @@ class CheckRepoTests(unittest.TestCase):
     def test_managed_output_directory_collision_fails_without_recursive_removal(self) -> None:
         with tempfile.TemporaryDirectory() as repository_dir, tempfile.TemporaryDirectory() as output_dir:
             Path(repository_dir, "README.md").write_text("# Example\n", encoding="utf-8")
+            sentinels = {
+                "snapshot.json": "preserve snapshot\n",
+                "report.md": "preserve report\n",
+                "comparison.sarif": "preserve sarif\n",
+            }
+            for name, content in sentinels.items():
+                Path(output_dir, name).write_text(content, encoding="utf-8")
             collision = Path(output_dir, "comparison.json")
             collision.mkdir()
             child = collision / "keep.txt"
@@ -199,6 +322,8 @@ class CheckRepoTests(unittest.TestCase):
             self.assertEqual(result.returncode, 2)
             self.assertIn("could not remove stale generated output", result.stderr)
             self.assertEqual(child.read_text(encoding="utf-8"), "preserve me\n")
+            for name, content in sentinels.items():
+                self.assertEqual(Path(output_dir, name).read_text(encoding="utf-8"), content)
 
     def test_rejects_output_directory_symlink_inside_repository(self) -> None:
         with tempfile.TemporaryDirectory() as repository_dir, tempfile.TemporaryDirectory() as external_dir:
@@ -218,8 +343,119 @@ class CheckRepoTests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 2)
-            self.assertIn("must not traverse a symbolic link inside the repository", result.stderr)
+            self.assertIn("must not traverse a symbolic link or reparse point", result.stderr)
             self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve me\n")
+
+    @unittest.skipUnless(os.name == "posix", "missing-parent redirect regression requires POSIX")
+    def test_rejects_symlink_reached_after_missing_parent_segment(self) -> None:
+        with tempfile.TemporaryDirectory() as repository_dir, tempfile.TemporaryDirectory() as external_dir:
+            repository = Path(repository_dir)
+            repository.joinpath("README.md").write_text("# Example\n", encoding="utf-8")
+            external = Path(external_dir)
+            sentinel = external / "snapshot.json"
+            sentinel.write_text("preserve me\n", encoding="utf-8")
+            linked_output = repository / "results"
+            try:
+                linked_output.symlink_to(external, target_is_directory=True)
+            except OSError as error:
+                self.skipTest(f"directory symlinks unavailable: {error}")
+            requested_output = repository / "does-not-exist" / ".." / "results"
+
+            result = self.run_check(
+                repository_dir, "--scan-mode", "filesystem", "--output-dir", str(requested_output),
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("must not traverse a symbolic link or reparse point", result.stderr)
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve me\n")
+
+    @unittest.skipUnless(os.name == "nt", "junction boundary test requires Windows")
+    def test_rejects_output_directory_junction_inside_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as repository_dir, tempfile.TemporaryDirectory() as external_dir:
+            repository = Path(repository_dir)
+            repository.joinpath("README.md").write_text("# Example\n", encoding="utf-8")
+            external = Path(external_dir)
+            sentinel = external / "snapshot.json"
+            sentinel.write_text("preserve me\n", encoding="utf-8")
+            junction = repository / "audit-repo-results"
+            created = subprocess.run(
+                ["cmd.exe", "/d", "/c", "mklink", "/J", str(junction), str(external)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if created.returncode != 0:
+                self.skipTest(f"junctions unavailable: {created.stderr or created.stdout}")
+            try:
+                self.assertTrue(junction.exists())
+                self.assertTrue(
+                    junction.lstat().st_file_attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+                )
+
+                result = self.run_check(
+                    repository_dir, "--scan-mode", "filesystem", "--output-dir", str(junction),
+                )
+
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("must not traverse a symbolic link or reparse point", result.stderr)
+                self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve me\n")
+            finally:
+                if junction.exists():
+                    junction.rmdir()
+
+    @unittest.skipUnless(os.name == "posix", "monorepo symlink boundary test requires POSIX")
+    def test_rejects_output_symlink_in_scanned_subdirectory_worktree_sibling(self) -> None:
+        with tempfile.TemporaryDirectory() as worktree_dir, tempfile.TemporaryDirectory() as external_dir:
+            worktree = Path(worktree_dir)
+            worktree.joinpath(".git").mkdir()
+            repository = worktree / "packages" / "app"
+            repository.mkdir(parents=True)
+            repository.joinpath("README.md").write_text("# Example\n", encoding="utf-8")
+            external = Path(external_dir)
+            sentinel = external / "snapshot.json"
+            sentinel.write_text("preserve me\n", encoding="utf-8")
+            linked_output = worktree / "audit-output"
+            linked_output.symlink_to(external, target_is_directory=True)
+
+            result = self.run_check(
+                str(repository), "--scan-mode", "filesystem", "--output-dir", str(linked_output),
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("containing Git worktree", result.stderr)
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve me\n")
+
+    @unittest.skipUnless(os.name == "nt", "monorepo junction boundary test requires Windows")
+    def test_rejects_output_junction_in_scanned_subdirectory_worktree_sibling(self) -> None:
+        with tempfile.TemporaryDirectory() as worktree_dir, tempfile.TemporaryDirectory() as external_dir:
+            worktree = Path(worktree_dir)
+            worktree.joinpath(".git").mkdir()
+            repository = worktree / "packages" / "app"
+            repository.mkdir(parents=True)
+            repository.joinpath("README.md").write_text("# Example\n", encoding="utf-8")
+            external = Path(external_dir)
+            sentinel = external / "snapshot.json"
+            sentinel.write_text("preserve me\n", encoding="utf-8")
+            junction = worktree / "audit-output"
+            created = subprocess.run(
+                ["cmd.exe", "/d", "/c", "mklink", "/J", str(junction), str(external)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if created.returncode != 0:
+                self.skipTest(f"junctions unavailable: {created.stderr or created.stdout}")
+            try:
+                result = self.run_check(
+                    str(repository), "--scan-mode", "filesystem", "--output-dir", str(junction),
+                )
+
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("containing Git worktree", result.stderr)
+                self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve me\n")
+            finally:
+                if junction.exists():
+                    junction.rmdir()
 
     def test_rejects_repo_output_symlink_through_repository_alias(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -245,7 +481,7 @@ class CheckRepoTests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 2)
-            self.assertIn("must not traverse a symbolic link inside the repository", result.stderr)
+            self.assertIn("must not traverse a symbolic link or reparse point", result.stderr)
             self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve me\n")
 
     def test_rejects_repo_output_symlink_through_different_alias(self) -> None:
@@ -272,7 +508,7 @@ class CheckRepoTests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 2)
-            self.assertIn("must not traverse a symbolic link inside the repository", result.stderr)
+            self.assertIn("must not traverse a symbolic link or reparse point", result.stderr)
             self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve me\n")
 
     def test_rejects_repo_output_symlink_through_case_variant(self) -> None:
@@ -300,7 +536,7 @@ class CheckRepoTests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 2)
-            self.assertIn("must not traverse a symbolic link inside the repository", result.stderr)
+            self.assertIn("must not traverse a symbolic link or reparse point", result.stderr)
             self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve me\n")
 
     def test_preserves_parent_segments_after_repository_alias(self) -> None:

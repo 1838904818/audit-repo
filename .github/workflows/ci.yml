@@ -76,3 +76,340 @@ jobs:
           ACTION_SNAPSHOT: ${{ steps.local_action_scoped.outputs.snapshot }}
           EXPECTED_SCOPE: ${{ github.repository }}:ci-scope
         run: python -c "import json, os; assert json.load(open(os.environ['ACTION_SNAPSHOT'], encoding='utf-8'))['scope_id'] == os.environ['EXPECTED_SCOPE']"
+
+  action-policy-e2e:
+    name: Composite Action policy E2E / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
+        python-version:
+          - "3.10"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Create repository fixture with spaces
+        shell: bash
+        env:
+          FIXTURE_DIR: ${{ runner.temp }}/audit repo action fixture
+        run: |
+          python -I - <<'PY'
+          import os
+          from pathlib import Path
+
+          fixture = Path(os.environ["FIXTURE_DIR"])
+          fixture.mkdir()
+          fixture.joinpath("README.md").write_text("# Action policy fixture\n", encoding="utf-8")
+          PY
+
+      - name: Create baseline through the local Action
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/audit repo action fixture
+          output-dir: ${{ runner.temp }}/audit repo baseline output
+          scan-mode: filesystem
+          scope-id: ${{ github.repository }}:action-policy-e2e
+
+      - name: Exercise both policy gates on a comparable baseline
+        id: policy_success
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/audit repo action fixture
+          output-dir: ${{ runner.temp }}/audit repo success output
+          baseline: ${{ runner.temp }}/audit repo baseline output/snapshot.json
+          scan-mode: filesystem
+          scope-id: ${{ github.repository }}:action-policy-e2e
+          fail-on-attention: "true"
+          require-comparable: "true"
+
+      - name: Verify all successful Action outputs and artifacts
+        shell: bash
+        env:
+          OUTPUT_DIR: ${{ runner.temp }}/audit repo success output
+          ACTION_SNAPSHOT: ${{ steps.policy_success.outputs.snapshot }}
+          ACTION_REPORT: ${{ steps.policy_success.outputs.report }}
+          ACTION_COMPARISON: ${{ steps.policy_success.outputs.comparison }}
+          ACTION_SARIF: ${{ steps.policy_success.outputs.sarif }}
+          ACTION_ATTENTION_COUNT: ${{ steps.policy_success.outputs['attention-count'] }}
+          ACTION_COMPARABLE: ${{ steps.policy_success.outputs.comparable }}
+          ACTION_TOOL_VERSION: ${{ steps.policy_success.outputs['tool-version'] }}
+          ACTION_SCAN_SEMANTICS_VERSION: ${{ steps.policy_success.outputs['scan-semantics-version'] }}
+        run: |
+          python -I - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          output_dir = Path(os.environ["OUTPUT_DIR"]).resolve()
+          outputs = {
+              "snapshot": os.environ["ACTION_SNAPSHOT"],
+              "report": os.environ["ACTION_REPORT"],
+              "comparison": os.environ["ACTION_COMPARISON"],
+              "sarif": os.environ["ACTION_SARIF"],
+              "attention-count": os.environ["ACTION_ATTENTION_COUNT"],
+              "comparable": os.environ["ACTION_COMPARABLE"],
+              "tool-version": os.environ["ACTION_TOOL_VERSION"],
+              "scan-semantics-version": os.environ["ACTION_SCAN_SEMANTICS_VERSION"],
+          }
+          assert len(outputs) == 8
+          assert all(value != "" for value in outputs.values()), outputs
+
+          filenames = {"snapshot.json", "report.md", "comparison.json", "comparison.sarif"}
+          assert {path.name for path in output_dir.iterdir()} == filenames
+          for output_name, filename in {
+              "snapshot": "snapshot.json",
+              "report": "report.md",
+              "comparison": "comparison.json",
+              "sarif": "comparison.sarif",
+          }.items():
+              assert Path(outputs[output_name]).resolve() == output_dir / filename
+
+          snapshot = json.loads((output_dir / "snapshot.json").read_text(encoding="utf-8"))
+          comparison = json.loads((output_dir / "comparison.json").read_text(encoding="utf-8"))
+          sarif = json.loads((output_dir / "comparison.sarif").read_text(encoding="utf-8"))
+          assert outputs["attention-count"] == "0"
+          assert outputs["comparable"] == "true"
+          assert outputs["tool-version"] == str(snapshot["tool_version"])
+          assert outputs["scan-semantics-version"] == str(snapshot["scan_semantics_version"])
+          assert comparison["summary"]["attention_count"] == 0
+          assert comparison["summary"]["comparable"] is True
+          assert sarif["version"] == "2.1.0"
+          assert sarif["runs"][0]["results"] == []
+          PY
+
+      - name: Add a sensitive-looking file after the baseline
+        shell: bash
+        env:
+          FIXTURE_DIR: ${{ runner.temp }}/audit repo action fixture
+        run: |
+          python -I - <<'PY'
+          import os
+          from pathlib import Path
+
+          Path(os.environ["FIXTURE_DIR"], ".env").write_text("EXAMPLE_ONLY=not-a-secret\n", encoding="utf-8")
+          PY
+
+      - name: Expected failure - fail-on-attention detects the new .env
+        id: attention_gate
+        continue-on-error: true
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/audit repo action fixture
+          output-dir: ${{ runner.temp }}/audit repo attention output
+          baseline: ${{ runner.temp }}/audit repo baseline output/snapshot.json
+          scan-mode: filesystem
+          scope-id: ${{ github.repository }}:action-policy-e2e
+          fail-on-attention: "true"
+          require-comparable: "true"
+
+      - name: Verify attention failure retains reports and a SARIF warning
+        shell: bash
+        env:
+          STEP_OUTCOME: ${{ steps.attention_gate.outcome }}
+          OUTPUT_DIR: ${{ runner.temp }}/audit repo attention output
+        run: |
+          python -I - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          assert os.environ["STEP_OUTCOME"] == "failure"
+          output_dir = Path(os.environ["OUTPUT_DIR"])
+          expected = {"snapshot.json", "report.md", "comparison.json", "comparison.sarif"}
+          assert {path.name for path in output_dir.iterdir()} == expected
+          comparison = json.loads((output_dir / "comparison.json").read_text(encoding="utf-8"))
+          report = (output_dir / "report.md").read_text(encoding="utf-8")
+          sarif = json.loads((output_dir / "comparison.sarif").read_text(encoding="utf-8"))
+          assert comparison["summary"]["comparable"] is True
+          assert comparison["summary"]["attention_count"] > 0
+          assert any(item["code"] == "sensitive-filename-added" for item in comparison["attention"])
+          assert "Sensitive-looking filename added" in report
+          assert any(
+              result["level"] == "warning"
+              and result.get("properties", {}).get("kind") == "attention"
+              for result in sarif["runs"][0]["results"]
+          )
+          print("::warning title=Expected audit-repo policy failure::.env produced an attention signal; retained reports were verified")
+          PY
+
+      - name: Expected failure - require-comparable rejects a changed scope
+        id: comparable_gate
+        continue-on-error: true
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/audit repo action fixture
+          output-dir: ${{ runner.temp }}/audit repo incomparable output
+          baseline: ${{ runner.temp }}/audit repo baseline output/snapshot.json
+          scan-mode: filesystem
+          scope-id: ${{ github.repository }}:different-action-policy-scope
+          require-comparable: "true"
+
+      - name: Verify comparability failure retains its limitation note
+        shell: bash
+        env:
+          STEP_OUTCOME: ${{ steps.comparable_gate.outcome }}
+          OUTPUT_DIR: ${{ runner.temp }}/audit repo incomparable output
+        run: |
+          python -I - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          assert os.environ["STEP_OUTCOME"] == "failure"
+          output_dir = Path(os.environ["OUTPUT_DIR"])
+          expected = {"snapshot.json", "report.md", "comparison.json", "comparison.sarif"}
+          assert {path.name for path in output_dir.iterdir()} == expected
+          comparison = json.loads((output_dir / "comparison.json").read_text(encoding="utf-8"))
+          report = (output_dir / "report.md").read_text(encoding="utf-8")
+          sarif = json.loads((output_dir / "comparison.sarif").read_text(encoding="utf-8"))
+          assert comparison["summary"]["comparable"] is False
+          assert any("scope IDs differ" in limitation for limitation in comparison["limitations"])
+          assert "scope IDs differ" in report
+          assert any(
+              result["ruleId"] == "comparison-limitation"
+              and result["level"] == "note"
+              and result.get("properties", {}).get("kind") == "limitation"
+              for result in sarif["runs"][0]["results"]
+          )
+          PY
+
+      - name: Seed outputs that a missing-baseline gate must preserve
+        shell: bash
+        env:
+          OUTPUT_DIR: ${{ runner.temp }}/audit repo missing baseline output
+        run: |
+          python -I - <<'PY'
+          import os
+          from pathlib import Path
+
+          output_dir = Path(os.environ["OUTPUT_DIR"])
+          output_dir.mkdir()
+          output_dir.joinpath("sentinel.txt").write_text("preserve sentinel\n", encoding="utf-8")
+          for name in ("snapshot.json", "report.md", "comparison.json", "comparison.sarif"):
+              output_dir.joinpath(name).write_text(f"preserve stale {name}\n", encoding="utf-8")
+          PY
+
+      - name: Expected failure - policy gates require a baseline
+        id: missing_baseline_gate
+        continue-on-error: true
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/audit repo action fixture
+          output-dir: ${{ runner.temp }}/audit repo missing baseline output
+          scan-mode: filesystem
+          scope-id: ${{ github.repository }}:action-policy-e2e
+          fail-on-attention: "true"
+          require-comparable: "true"
+
+      - name: Verify missing-baseline rejection changed no existing output
+        shell: bash
+        env:
+          STEP_OUTCOME: ${{ steps.missing_baseline_gate.outcome }}
+          OUTPUT_DIR: ${{ runner.temp }}/audit repo missing baseline output
+        run: |
+          python -I - <<'PY'
+          import os
+          from pathlib import Path
+
+          assert os.environ["STEP_OUTCOME"] == "failure"
+          output_dir = Path(os.environ["OUTPUT_DIR"])
+          assert output_dir.joinpath("sentinel.txt").read_text(encoding="utf-8") == "preserve sentinel\n"
+          for name in ("snapshot.json", "report.md", "comparison.json", "comparison.sarif"):
+              assert output_dir.joinpath(name).read_text(encoding="utf-8") == f"preserve stale {name}\n"
+          PY
+
+      - name: Seed invalid-boolean sentinel
+        shell: bash
+        env:
+          OUTPUT_DIR: ${{ runner.temp }}/audit repo invalid boolean output
+        run: |
+          python -I - <<'PY'
+          import os
+          from pathlib import Path
+
+          output_dir = Path(os.environ["OUTPUT_DIR"])
+          output_dir.mkdir()
+          output_dir.joinpath("sentinel.txt").write_text("preserve invalid boolean sentinel\n", encoding="utf-8")
+          PY
+
+      - name: Expected failure - boolean inputs are strict
+        id: invalid_boolean
+        continue-on-error: true
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/audit repo action fixture
+          output-dir: ${{ runner.temp }}/audit repo invalid boolean output
+          baseline: ${{ runner.temp }}/audit repo baseline output/snapshot.json
+          scan-mode: filesystem
+          scope-id: ${{ github.repository }}:action-policy-e2e
+          fail-on-attention: "TRUE"
+
+      - name: Verify invalid boolean writes no managed output
+        shell: bash
+        env:
+          STEP_OUTCOME: ${{ steps.invalid_boolean.outcome }}
+          OUTPUT_DIR: ${{ runner.temp }}/audit repo invalid boolean output
+        run: |
+          python -I - <<'PY'
+          import os
+          from pathlib import Path
+
+          assert os.environ["STEP_OUTCOME"] == "failure"
+          output_dir = Path(os.environ["OUTPUT_DIR"])
+          assert output_dir.joinpath("sentinel.txt").read_text(encoding="utf-8") == "preserve invalid boolean sentinel\n"
+          assert not any(
+              output_dir.joinpath(name).exists()
+              for name in ("snapshot.json", "report.md", "comparison.json", "comparison.sarif")
+          )
+          PY
+
+      - name: Create a managed-output directory collision
+        shell: bash
+        env:
+          OUTPUT_DIR: ${{ runner.temp }}/audit repo collision output
+        run: |
+          python -I - <<'PY'
+          import os
+          from pathlib import Path
+
+          child = Path(os.environ["OUTPUT_DIR"], "comparison.json", "keep.txt")
+          child.parent.mkdir(parents=True)
+          child.write_text("preserve collision child\n", encoding="utf-8")
+          for name in ("snapshot.json", "report.md", "comparison.sarif"):
+              Path(os.environ["OUTPUT_DIR"], name).write_text(f"preserve collision {name}\n", encoding="utf-8")
+          PY
+
+      - name: Expected failure - managed output cannot be a directory
+        id: managed_output_collision
+        continue-on-error: true
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/audit repo action fixture
+          output-dir: ${{ runner.temp }}/audit repo collision output
+          scan-mode: filesystem
+          scope-id: ${{ github.repository }}:action-policy-e2e
+
+      - name: Verify managed-output collision preserves its child
+        shell: bash
+        env:
+          STEP_OUTCOME: ${{ steps.managed_output_collision.outcome }}
+          OUTPUT_DIR: ${{ runner.temp }}/audit repo collision output
+        run: |
+          python -I - <<'PY'
+          import os
+          from pathlib import Path
+
+          assert os.environ["STEP_OUTCOME"] == "failure"
+          output_dir = Path(os.environ["OUTPUT_DIR"])
+          child = output_dir / "comparison.json" / "keep.txt"
+          assert child.read_text(encoding="utf-8") == "preserve collision child\n"
+          for name in ("snapshot.json", "report.md", "comparison.sarif"):
+              assert output_dir.joinpath(name).read_text(encoding="utf-8") == f"preserve collision {name}\n"
+          PY

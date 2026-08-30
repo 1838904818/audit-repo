@@ -99,8 +99,8 @@ TOOL_CONFIG_NAMES = {
 }
 LARGE_FILE_BYTES = 5 * 1024 * 1024
 SCHEMA_VERSION = 1
-TOOL_VERSION = "1.9.0"
-SCAN_SEMANTICS_VERSION = 2
+TOOL_VERSION = "1.9.1"
+SCAN_SEMANTICS_VERSION = 3
 DISABLED_GIT_HOOKS_PATH = Path(__file__).resolve().as_posix()
 SCAN_MODES = {"filesystem", "git-visible", "tracked"}
 WORK_MARKER_RE = re.compile(r"(?im)(?:#|//|/\*+|<!--|;|--)\s*(TODO|FIXME|HACK|XXX)\b")
@@ -173,6 +173,22 @@ def has_excluded_directory(relative_path: str, excluded: set[str]) -> bool:
     return any(part.lower() in excluded for part in relative_path.split("/")[:-1])
 
 
+def metadata_is_link_or_reparse_point(metadata: os.stat_result) -> bool:
+    if stat.S_ISLNK(metadata.st_mode):
+        return True
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(attributes & reparse_flag)
+
+
+def path_is_link_or_reparse_point(path: Path) -> bool:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return False
+    return metadata_is_link_or_reparse_point(metadata)
+
+
 def walk_files(
     root: Path,
     max_files: int,
@@ -192,18 +208,29 @@ def walk_files(
         directory_error_count += 1
 
     for current, dirs, names in os.walk(root, followlinks=False, onerror=record_directory_error):
-        dirs[:] = sorted(d for d in dirs if d.lower() not in skipped)
+        safe_directories = []
+        for directory_name in sorted(dirs):
+            if directory_name.lower() in skipped:
+                continue
+            try:
+                if path_is_link_or_reparse_point(Path(current) / directory_name):
+                    continue
+            except (OSError, UnicodeError):
+                directory_error_count += 1
+                continue
+            safe_directories.append(directory_name)
+        dirs[:] = safe_directories
         for name in sorted(names):
             path = Path(current) / name
             try:
-                file_mode = path.lstat().st_mode
+                metadata = path.lstat()
             except (FileNotFoundError, NotADirectoryError):
                 missing_count += 1
                 continue
             except (OSError, UnicodeError):
                 unavailable_count += 1
                 continue
-            if not stat.S_ISREG(file_mode):
+            if metadata_is_link_or_reparse_point(metadata) or not stat.S_ISREG(metadata.st_mode):
                 continue
             rel = relative(path, root)
             if not path_selected(rel, include_paths, exclude_paths):
@@ -398,6 +425,7 @@ def git_scan_files(
         ))
     skipped = SKIP_DIRS | {name.lower() for name in exclude_dirs}
     selected: list[Path] = []
+    redirect_cache: dict[Path, bool] = {}
     missing_count = 0
     unavailable_count = 0
     truncated = False
@@ -406,16 +434,28 @@ def git_scan_files(
             continue
         if not path_selected(normalized, include_paths, exclude_paths):
             continue
-        path = root / Path(*normalized.split("/"))
+        parts = normalized.split("/")
+        path = root / Path(*parts)
         try:
-            file_mode = path.lstat().st_mode
+            current = root
+            redirected = False
+            for part in parts[:-1]:
+                current /= part
+                if current not in redirect_cache:
+                    redirect_cache[current] = path_is_link_or_reparse_point(current)
+                if redirect_cache[current]:
+                    redirected = True
+                    break
+            if redirected:
+                continue
+            metadata = path.lstat()
         except (FileNotFoundError, NotADirectoryError):
             missing_count += 1
             continue
         except (OSError, UnicodeError):
             unavailable_count += 1
             continue
-        if not stat.S_ISREG(file_mode):
+        if metadata_is_link_or_reparse_point(metadata) or not stat.S_ISREG(metadata.st_mode):
             continue
         if len(selected) < max_files:
             selected.append(path)

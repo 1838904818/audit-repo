@@ -285,10 +285,10 @@ class CollectRepoSignalsTests(unittest.TestCase):
             data = MODULE.collect(root, 100)
             rendered = MODULE.to_markdown(data)
 
-            self.assertEqual(data["tool_version"], "1.9.0")
-            self.assertEqual(data["scan_semantics_version"], 2)
-            self.assertIn("Collector version: `1.9.0`", rendered)
-            self.assertIn("Scan semantics version: 2", rendered)
+            self.assertEqual(data["tool_version"], "1.9.1")
+            self.assertEqual(data["scan_semantics_version"], 3)
+            self.assertIn("Collector version: `1.9.1`", rendered)
+            self.assertIn("Scan semantics version: 3", rendered)
             self.assertFalse(data["git_repository"])
             self.assertEqual(data["test_file_count"], 1)
             self.assertEqual(data["manifests"], ["package.json", "pyproject.toml"])
@@ -558,6 +558,43 @@ class CollectRepoSignalsTests(unittest.TestCase):
             self.assertEqual(data["large_files"][0]["path"], "large-22.bin")
             self.assertIn("3 more recorded in JSON output", rendered)
             self.assertNotIn("`large-00.bin`", rendered)
+
+    @unittest.skipUnless(os.name == "nt", "junction traversal regression requires Windows")
+    def test_scan_modes_skip_repository_junctions(self) -> None:
+        with tempfile.TemporaryDirectory() as repository_dir, tempfile.TemporaryDirectory() as external_dir:
+            repository = Path(repository_dir)
+            repository.joinpath("README.md").write_text("# Example\n", encoding="utf-8")
+            external = Path(external_dir)
+            external.joinpath("outside.py").write_text("# TODO must stay outside\n", encoding="utf-8")
+            external.joinpath(".env").write_text("EXAMPLE_ONLY=not-a-secret\n", encoding="utf-8")
+            junction = repository / "external-junction"
+            created = subprocess.run(
+                ["cmd.exe", "/d", "/c", "mklink", "/J", str(junction), str(external)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if created.returncode != 0:
+                self.skipTest(f"junctions unavailable: {created.stderr or created.stdout}")
+            try:
+                modes = ["filesystem"]
+                if shutil.which("git"):
+                    subprocess.run(["git", "-C", str(repository), "init", "-q"], check=True, timeout=10)
+                    subprocess.run(
+                        ["git", "-C", str(repository), "add", "README.md"], check=True, timeout=10,
+                    )
+                    modes.extend(("git-visible", "tracked"))
+
+                for mode in modes:
+                    with self.subTest(mode=mode):
+                        data = MODULE.collect(repository, 100, scan_mode=mode)
+                        self.assertEqual(data["file_count"], 1)
+                        self.assertEqual(data["languages_by_file_count"].get("Python", 0), 0)
+                        self.assertEqual(data["work_markers"], {})
+                        self.assertEqual(data["sensitive_looking_files"], [])
+            finally:
+                if junction.exists():
+                    junction.rmdir()
 
     @unittest.skipUnless(shutil.which("git"), "Git is required for scan-mode coverage")
     def test_git_scan_modes_distinguish_visible_tracked_and_ignored_files(self) -> None:

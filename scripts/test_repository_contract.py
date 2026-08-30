@@ -107,6 +107,10 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn('tempfile.mkdtemp(prefix="audit-repo-", dir=os.environ["RUNNER_TEMP"])', action)
         self.assertIn('AUDIT_OUTPUT_DIR="$(python -I -c', action)
         self.assertIn('python -I "$GITHUB_ACTION_PATH/scripts/check_repo.py"', action)
+        self.assertIn('validate_boolean "fail-on-attention" "$AUDIT_FAIL_ON_ATTENTION"', action)
+        self.assertIn('validate_boolean "require-comparable" "$AUDIT_REQUIRE_COMPARABLE"', action)
+        self.assertIn("true|false) return 0", action)
+        self.assertIn("A comparison gate requires a non-empty baseline", action)
         self.assertNotRegex(action, r'(?m)^\s*args=\([^\n]*--scope-id')
 
     def test_python_isolated_mode_ignores_checkout_module_shadowing(self) -> None:
@@ -131,9 +135,89 @@ class RepositoryContractTests(unittest.TestCase):
     def test_release_workflow_validates_assets_and_is_rerunnable(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
         self.assertIn("Exercise packaged Skill", workflow)
-        self.assertIn("gh release download", workflow)
-        self.assertIn("cmp ", workflow)
-        self.assertNotIn("--clobber", workflow)
+        self.assertIn("group: release-${{ github.repository }}-${{ github.ref }}", workflow)
+        self.assertIn("cancel-in-progress: false", workflow)
+        provenance_start = workflow.index("  provenance:\n")
+        verify_start = workflow.index("  verify:\n")
+        provenance = workflow[provenance_start:verify_start]
+        self.assertLess(provenance_start, verify_start)
+        self.assertIn("contents: read", provenance)
+        self.assertNotIn("uses:", provenance)
+        self.assertNotIn("actions/checkout", provenance)
+        self.assertNotIn("scripts/", provenance)
+        self.assertRegex(workflow, r"(?m)^  verify:\n(?:.*\n){0,3}    needs: provenance$")
+        package_start = workflow.index("  package:\n")
+        publish_start = workflow.index("  publish:\n")
+        package = workflow[package_start:publish_start]
+        publish = workflow[publish_start:]
+        self.assertIn("needs: verify", package)
+        self.assertNotIn("actions/checkout", publish)
+        self.assertNotIn("git fetch", publish)
+        self.assertIn("Revalidate release ref before publishing", publish)
+        self.assertIn("tag-ref-object-sha: ${{ steps.provenance.outputs.tag-ref-object-sha }}", provenance)
+        self.assertIn("id: provenance", provenance)
+        self.assertIn('printf \'tag-ref-object-sha=%s\\n\'', provenance)
+        self.assertRegex(publish, r"(?m)^    needs:\n      - package\n      - provenance$")
+        self.assertIn('EXPECTED_TAG_OBJECT_SHA: ${{ needs.provenance.outputs.tag-ref-object-sha }}', publish)
+        self.assertIn('repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG_PATH}', publish)
+        self.assertIn('[[ "${TAG_OBJECT_SHA}" != "${EXPECTED_TAG_OBJECT_SHA}" ]]', publish)
+        self.assertIn("Revalidate release provenance after asset verification", publish)
+        self.assertIn('repos/${GITHUB_REPOSITORY}/git/ref/heads/${DEFAULT_BRANCH_PATH}', publish)
+        self.assertIn('compare/${EXPECTED_SHA}...${DEFAULT_SHA}', publish)
+        self.assertIn('git/ref/tags/${TAG_PATH}', provenance)
+        self.assertIn('git/tags/${OBJECT_SHA}', provenance)
+        self.assertIn('"${OBJECT_SHA}" != "${EXPECTED_SHA}"', provenance)
+        self.assertIn('compare/${EXPECTED_SHA}...${DEFAULT_SHA}', provenance)
+        self.assertIn('"${COMPARE_STATUS}" != "identical"', provenance)
+        self.assertIn('"${COMPARE_STATUS}" != "ahead"', provenance)
+        self.assertIn('--target "${GITHUB_SHA}"', workflow)
+        self.assertEqual(workflow.count('gh release create "${GITHUB_REF_NAME}"'), 1)
+        self.assertIn('"dist/audit-repo-${GITHUB_REF_NAME}.zip" \\', workflow)
+        self.assertIn('"dist/audit-repo-${GITHUB_REF_NAME}.zip.sha256" \\', workflow)
+        self.assertEqual(workflow.count('gh release download "${EXPECTED_TAG}"'), 2)
+        self.assertIn('--pattern "${EXPECTED_ZIP}"', workflow)
+        self.assertIn('--pattern "${EXPECTED_CHECKSUM}"', workflow)
+        self.assertIn('release.get("tag_name") != expected_tag', workflow)
+        self.assertIn('release.get("draft") is not False', workflow)
+        self.assertIn('release.get("prerelease") is not False', workflow)
+        self.assertIn('target_commitish = release.get("target_commitish")', workflow)
+        self.assertIn('not isinstance(target_commitish, str) or not target_commitish', workflow)
+        self.assertIn('asset.get("state") != "uploaded"', workflow)
+        self.assertIn("len(names) != 2 or set(names) != expected_assets", workflow)
+        self.assertIn("Existing release found; leaving it unchanged.", workflow)
+        self.assertIn('gh api --paginate --slurp \\', workflow)
+        self.assertIn('releases?per_page=100', workflow)
+        self.assertIn('A draft Release already exists for tag', workflow)
+        self.assertIn('refusing to mutate it', workflow)
+        self.assertIn('if [[ "${RELEASE_STATE}" == "existing" ]]', workflow)
+        self.assertIn('elif [[ "${RELEASE_STATE}" == "absent" ]]', workflow)
+        self.assertEqual(workflow.count('releases/tags/${EXPECTED_TAG}'), 1)
+        self.assertIn('cmp "dist/${EXPECTED_ZIP}"', workflow)
+        self.assertIn('cmp "dist/${EXPECTED_CHECKSUM}"', workflow)
+        for forbidden in (
+            "dist/*", "--clobber", "gh release edit", "gh release upload", "gh release delete",
+            'grep -Fq "HTTP 404"',
+            'repos/${GITHUB_REPOSITORY}/commits/${GITHUB_REF_NAME}',
+            'repos/${GITHUB_REPOSITORY}/commits/${TAG_PATH}',
+            'repos/${GITHUB_REPOSITORY}/commits/${DEFAULT_BRANCH_PATH}',
+        ):
+            self.assertNotIn(forbidden, workflow)
+
+    def test_ci_exercises_action_policy_fail_closed_paths(self) -> None:
+        ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        self.assertIn("action-policy-e2e:", ci)
+        self.assertIn("audit repo action fixture", ci)
+        self.assertEqual(ci.count("continue-on-error: true"), 5)
+        self.assertEqual(ci.count("python -I - <<'PY'"), 11)
+        self.assertNotIn("python - <<'PY'", ci)
+        for step_id in (
+            "attention_gate", "comparable_gate", "missing_baseline_gate",
+            "invalid_boolean", "managed_output_collision",
+        ):
+            self.assertIn(f"STEP_OUTCOME: ${{{{ steps.{step_id}.outcome }}}}", ci)
+        self.assertIn('fail-on-attention: "TRUE"', ci)
+        self.assertIn('result["level"] == "warning"', ci)
+        self.assertIn('result["level"] == "note"', ci)
 
     def test_ci_covers_supported_platforms_and_python_versions(self) -> None:
         ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
