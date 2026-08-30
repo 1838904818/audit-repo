@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
 import json
 import os
 import stat
@@ -25,6 +27,46 @@ SPEC.loader.exec_module(MODULE)
 class CheckRepoTests(unittest.TestCase):
     def run_check(self, *arguments: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run([sys.executable, str(SCRIPT), *arguments], text=True, capture_output=True, check=False)
+
+    def test_collector_nonzero_status_is_an_execution_error(self) -> None:
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            first = MODULE.collect_snapshot([sys.executable, "-c", "raise SystemExit(1)"])
+            second = MODULE.collect_snapshot([sys.executable, "-c", "raise SystemExit(17)"])
+        self.assertEqual(first, (2, None, None))
+        self.assertEqual(second, (2, None, None))
+        self.assertIn("exit status 1", errors.getvalue())
+        self.assertIn("exit status 17", errors.getvalue())
+
+    def test_leading_hyphen_collection_values_round_trip_to_collector(self) -> None:
+        with tempfile.TemporaryDirectory() as repository_dir, tempfile.TemporaryDirectory() as output_dir:
+            repository = Path(repository_dir)
+            repository.joinpath("README.md").write_text("# Example\n", encoding="utf-8")
+            repository.joinpath("--generated", "excluded").mkdir(parents=True)
+            repository.joinpath("--generated", "keep.txt").write_text("keep\n", encoding="utf-8")
+            repository.joinpath("--generated", "excluded", "drop.txt").write_text("drop\n", encoding="utf-8")
+            repository.joinpath("--cache").mkdir()
+            repository.joinpath("--cache", "hidden.txt").write_text("hidden\n", encoding="utf-8")
+
+            result = self.run_check(
+                repository_dir,
+                "--scan-mode=filesystem",
+                "--scope-id=--scope",
+                "--include-path=*",
+                "--include-path=--generated/*",
+                "--exclude-path=--generated/excluded/*",
+                "--exclude-dir=--cache",
+                f"--output-dir={output_dir}",
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            snapshot = json.loads(Path(output_dir, "snapshot.json").read_text(encoding="utf-8"))
+            self.assertEqual(snapshot["scope_id"], "--scope")
+            self.assertEqual(snapshot["include_path_patterns"], ["*", "--generated/*"])
+            self.assertEqual(snapshot["exclude_path_patterns"], ["--generated/excluded/*"])
+            self.assertEqual(snapshot["excluded_directory_names"], ["--cache"])
+            self.assertEqual(snapshot["file_count"], 2)
+            self.assertEqual(snapshot["documentation"], ["README.md"])
 
     def test_creates_snapshot_and_report_without_baseline(self) -> None:
         with tempfile.TemporaryDirectory() as repository_dir, tempfile.TemporaryDirectory() as output_dir:
@@ -60,9 +102,9 @@ class CheckRepoTests(unittest.TestCase):
             self.assertIn("attention-count=0\n", outputs)
             self.assertIn("comparable=true\n", outputs)
             self.assertIn("sarif=", outputs)
-            self.assertIn("tool-version=1.10.0\n", outputs)
+            self.assertIn("tool-version=1.10.1\n", outputs)
             self.assertIn("scan-semantics-version=3\n", outputs)
-            self.assertIn("tool_version=1.10.0\n", second.stdout)
+            self.assertIn("tool_version=1.10.1\n", second.stdout)
 
     def test_comparison_gates_require_baseline_before_output_cleanup(self) -> None:
         gate_combinations = (
@@ -89,6 +131,125 @@ class CheckRepoTests(unittest.TestCase):
                 self.assertIn("requires --baseline", result.stderr)
                 for name, content in sentinels.items():
                     self.assertEqual(Path(output_dir, name).read_text(encoding="utf-8"), content)
+
+    def test_collection_option_preflight_has_no_output_side_effects(self) -> None:
+        cases = (
+            ("max-files", ("--max-files", "0"), "--max-files must be positive"),
+            ("large-nan", ("--large-file-mib", "nan"), "--large-file-mib must be positive"),
+            ("large-infinity", ("--large-file-mib", "inf"), "--large-file-mib must be positive"),
+            ("large-zero", ("--large-file-mib", "0"), "--large-file-mib must be positive"),
+            ("large-negative", ("--large-file-mib", "-1"), "--large-file-mib must be positive"),
+            ("large-overflow", ("--large-file-mib", "1e308"), "--large-file-mib is too large"),
+            ("include", ("--include-path", "../secret/*"), "path patterns"),
+            ("exclude", ("--exclude-path", "/absolute/*"), "path patterns"),
+            ("scope", ("--scope-id", "   "), "--scope-id"),
+        )
+        for label, invalid_arguments, message in cases:
+            for output_mode in ("existing", "missing", "temporary"):
+                with self.subTest(label=label, output_mode=output_mode), \
+                        tempfile.TemporaryDirectory() as repository_dir, \
+                        tempfile.TemporaryDirectory() as parent_dir:
+                    repository = Path(repository_dir)
+                    repository.joinpath("README.md").write_text("# Example\n", encoding="utf-8")
+                    parent = Path(parent_dir)
+                    github_output = parent / "github-output.txt"
+                    original_github_output = b"preserve github output\n"
+                    github_output.write_bytes(original_github_output)
+
+                    sentinels: dict[str, bytes] = {}
+                    if output_mode == "temporary":
+                        output_arguments = ("--temporary-output-parent", str(parent / "temporary"))
+                        temporary_parent = parent / "temporary"
+                        temporary_parent.mkdir()
+                        children_before = sorted(temporary_parent.iterdir())
+                    else:
+                        output_dir = parent / "results"
+                        output_arguments = ("--output-dir", str(output_dir))
+                        if output_mode == "existing":
+                            output_dir.mkdir()
+                            sentinels = {
+                                name: f"preserve {name}\n".encode()
+                                for name in ("snapshot.json", "report.md", "comparison.json", "comparison.sarif")
+                            }
+                            for name, content in sentinels.items():
+                                output_dir.joinpath(name).write_bytes(content)
+
+                    result = self.run_check(
+                        repository_dir,
+                        "--scan-mode", "filesystem",
+                        *output_arguments,
+                        *invalid_arguments,
+                        "--github-output", str(github_output),
+                    )
+
+                    self.assertEqual(result.returncode, 2)
+                    self.assertIn(message, result.stderr)
+                    self.assertNotIn("Traceback", result.stderr)
+                    self.assertEqual(github_output.read_bytes(), original_github_output)
+                    if output_mode == "temporary":
+                        self.assertEqual(sorted(temporary_parent.iterdir()), children_before)
+                    elif output_mode == "missing":
+                        self.assertFalse(output_dir.exists())
+                    else:
+                        for name, content in sentinels.items():
+                            self.assertEqual(output_dir.joinpath(name).read_bytes(), content)
+
+    def test_collector_failures_preserve_outputs_and_do_not_allocate_temporary_results(self) -> None:
+        cases = (
+            ("missing-root", "filesystem", "not a directory"),
+            ("tracked-non-git", "tracked", "requires a Git working tree"),
+        )
+        for label, scan_mode, message in cases:
+            for output_mode in ("existing", "temporary"):
+                with self.subTest(label=label, output_mode=output_mode), \
+                        tempfile.TemporaryDirectory() as root_dir, \
+                        tempfile.TemporaryDirectory() as output_parent_dir:
+                    root = Path(root_dir)
+                    repository = root / "repository"
+                    if label == "tracked-non-git":
+                        repository.mkdir()
+                        repository.joinpath("README.md").write_text("# Example\n", encoding="utf-8")
+                    output_parent = Path(output_parent_dir)
+                    github_output = output_parent / "github-output.txt"
+                    original_github_output = b"preserve github output\n"
+                    github_output.write_bytes(original_github_output)
+
+                    sentinels: dict[str, bytes] = {}
+                    if output_mode == "existing":
+                        output_dir = output_parent / "results"
+                        output_dir.mkdir()
+                        sentinels = {
+                            name: f"preserve {name}\n".encode()
+                            for name in ("snapshot.json", "report.md", "comparison.json", "comparison.sarif")
+                        }
+                        for name, content in sentinels.items():
+                            output_dir.joinpath(name).write_bytes(content)
+                        output_arguments = ("--output-dir", str(output_dir))
+                    else:
+                        temporary_parent = output_parent / "temporary"
+                        temporary_parent.mkdir()
+                        unrelated = temporary_parent / "keep.txt"
+                        unrelated.write_text("preserve me\n", encoding="utf-8")
+                        children_before = sorted(temporary_parent.iterdir())
+                        output_arguments = ("--temporary-output-parent", str(temporary_parent))
+
+                    result = self.run_check(
+                        str(repository),
+                        "--scan-mode", scan_mode,
+                        *output_arguments,
+                        "--github-output", str(github_output),
+                    )
+
+                    self.assertEqual(result.returncode, 2)
+                    self.assertIn(message, result.stderr)
+                    self.assertNotIn("Traceback", result.stderr)
+                    self.assertEqual(github_output.read_bytes(), original_github_output)
+                    if output_mode == "existing":
+                        for name, content in sentinels.items():
+                            self.assertEqual(output_dir.joinpath(name).read_bytes(), content)
+                    else:
+                        self.assertEqual(sorted(temporary_parent.iterdir()), children_before)
+                        self.assertEqual(list(temporary_parent.glob("audit-repo-*")), [])
 
     def test_baseline_digest_requires_baseline_before_output_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as repository_dir, tempfile.TemporaryDirectory() as output_dir, \
@@ -490,6 +651,35 @@ class CheckRepoTests(unittest.TestCase):
             self.assertFalse(Path(output_dir, "comparison.json").exists())
             self.assertFalse(Path(output_dir, "comparison.sarif").exists())
             self.assertEqual(keep.read_text(encoding="utf-8"), "preserve me\n")
+
+    def test_in_repository_output_rerun_clears_managed_files_before_filesystem_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as repository_dir:
+            repository = Path(repository_dir).resolve()
+            repository.joinpath("README.md").write_text("# Example\n", encoding="utf-8")
+            output_dir = repository / "audit-repo-results"
+
+            first = self.run_check(
+                str(repository), "--scan-mode", "filesystem", "--output-dir", str(output_dir),
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertEqual(json.loads(output_dir.joinpath("snapshot.json").read_text(encoding="utf-8"))["file_count"], 1)
+
+            for name in ("snapshot.json", "report.md", "comparison.json", "comparison.sarif"):
+                output_dir.joinpath(name).write_text(f"stale {name}\n", encoding="utf-8")
+
+            second = self.run_check(
+                str(repository), "--scan-mode", "filesystem", "--output-dir", str(output_dir),
+            )
+
+            self.assertEqual(second.returncode, 0, second.stderr)
+            snapshot = json.loads(output_dir.joinpath("snapshot.json").read_text(encoding="utf-8"))
+            self.assertEqual(snapshot["file_count"], 1)
+            self.assertEqual(Path(snapshot["root"]), repository)
+            self.assertFalse(output_dir.joinpath("comparison.json").exists())
+            self.assertFalse(output_dir.joinpath("comparison.sarif").exists())
+            stdout_values = dict(line.split("=", 1) for line in second.stdout.splitlines())
+            self.assertEqual(Path(stdout_values["snapshot"]), output_dir / "snapshot.json")
+            self.assertEqual(Path(stdout_values["report"]), output_dir / "report.md")
 
     def test_invalid_baseline_preserves_prior_outputs_before_collection(self) -> None:
         with tempfile.TemporaryDirectory() as repository_dir, tempfile.TemporaryDirectory() as baseline_dir, \

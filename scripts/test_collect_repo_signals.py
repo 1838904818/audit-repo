@@ -228,6 +228,32 @@ class CollectRepoSignalsTests(unittest.TestCase):
         self.assertNotIn("GIT_CONFIG_COUNT", sanitized)
         self.assertEqual(sanitized["GIT_PAGER"], "cat")
 
+    def test_collection_target_uses_hardened_git_probe_and_wraps_os_errors(self) -> None:
+        trusted_git = Path("C:/trusted/git.exe") if os.name == "nt" else Path("/trusted/git")
+        completed = subprocess.CompletedProcess([], 0, stdout=b"true\n")
+        with tempfile.TemporaryDirectory() as temp_dir, \
+                mock.patch.object(MODULE, "resolve_git_executable", return_value=trusted_git), \
+                mock.patch.object(MODULE.subprocess, "run", return_value=completed) as run_mock, \
+                mock.patch.dict(os.environ, {"GIT_DIR": "attacker-controlled"}):
+            root = Path(temp_dir).resolve()
+            self.assertEqual(MODULE.validate_collection_target(root, "tracked"), root)
+
+        command = run_mock.call_args.args[0]
+        environment = run_mock.call_args.kwargs["env"]
+        self.assertEqual(command[0], str(trusted_git))
+        self.assertEqual(command[-2:], ["rev-parse", "--is-inside-work-tree"])
+        self.assertIn(f"core.hooksPath={MODULE.DISABLED_GIT_HOOKS_PATH}", command)
+        self.assertIn("core.fsmonitor=false", command)
+        self.assertNotIn("GIT_DIR", environment)
+        self.assertEqual(environment["GIT_OPTIONAL_LOCKS"], "0")
+        self.assertEqual(environment["GIT_TERMINAL_PROMPT"], "0")
+
+        with tempfile.TemporaryDirectory() as temp_dir, \
+                mock.patch.object(MODULE, "resolve_git_executable", return_value=trusted_git), \
+                mock.patch.object(MODULE.subprocess, "run", side_effect=PermissionError("blocked")):
+            with self.assertRaisesRegex(MODULE.CollectionError, "could not run Git working-tree validation"):
+                MODULE.validate_collection_target(Path(temp_dir), "tracked")
+
     def test_git_metadata_never_runs_status(self) -> None:
         root = Path("/audit-target")
         with mock.patch.object(MODULE, "git_output", return_value="main") as git_output:
@@ -285,9 +311,9 @@ class CollectRepoSignalsTests(unittest.TestCase):
             data = MODULE.collect(root, 100)
             rendered = MODULE.to_markdown(data)
 
-            self.assertEqual(data["tool_version"], "1.10.0")
+            self.assertEqual(data["tool_version"], "1.10.1")
             self.assertEqual(data["scan_semantics_version"], 3)
-            self.assertIn("Collector version: `1.10.0`", rendered)
+            self.assertIn("Collector version: `1.10.1`", rendered)
             self.assertIn("Scan semantics version: 3", rendered)
             self.assertFalse(data["git_repository"])
             self.assertEqual(data["test_file_count"], 1)
@@ -765,6 +791,41 @@ class CollectRepoSignalsTests(unittest.TestCase):
             self.assertIn("requires a Git working tree", result.stderr)
             self.assertNotIn("Traceback", result.stderr)
 
+    def test_shared_collection_option_validation_normalizes_and_rejects_invalid_values(self) -> None:
+        threshold_bytes, includes, excludes, scope_id = MODULE.validate_collection_options(
+            5,
+            5.0,
+            include_paths=["./packages/*", "packages/*"],
+            exclude_paths=["./packages/generated/*", "packages/generated/*"],
+            scope_id="api-package",
+        )
+
+        self.assertEqual(threshold_bytes, 5 * 1_048_576)
+        self.assertEqual(includes, ["packages/*"])
+        self.assertEqual(excludes, ["packages/generated/*"])
+        self.assertEqual(scope_id, "api-package")
+
+        cases = (
+            ("max-files", 0, 5.0, (), (), None, "--max-files must be positive"),
+            ("large-nan", 5, float("nan"), (), (), None, "--large-file-mib must be positive"),
+            ("large-infinity", 5, float("inf"), (), (), None, "--large-file-mib must be positive"),
+            ("large-zero", 5, 0.0, (), (), None, "--large-file-mib must be positive"),
+            ("large-negative", 5, -1.0, (), (), None, "--large-file-mib must be positive"),
+            ("large-overflow", 5, 1e308, (), (), None, "--large-file-mib is too large"),
+            ("include", 5, 5.0, ("../secret/*",), (), None, "path patterns"),
+            ("exclude", 5, 5.0, (), ("/absolute/*",), None, "path patterns"),
+            ("scope", 5, 5.0, (), (), "   ", "--scope-id"),
+        )
+        for label, max_files, large_file_mib, include_paths, exclude_paths, candidate_scope, message in cases:
+            with self.subTest(label=label), self.assertRaisesRegex(MODULE.CollectionError, message):
+                MODULE.validate_collection_options(
+                    max_files,
+                    large_file_mib,
+                    include_paths=include_paths,
+                    exclude_paths=exclude_paths,
+                    scope_id=candidate_scope,
+                )
+
     def test_markdown_escapes_untrusted_paths(self) -> None:
         data = MODULE.collect(Path(__file__).parent, 100)
         data["root"] = "repo`\n\n## Forged result\u2028still forged"
@@ -830,31 +891,72 @@ class CollectRepoSignalsTests(unittest.TestCase):
             self.assertEqual(json.loads(MODULE.to_json(data))["test_file_examples"], [expected])
             MODULE.to_markdown(data).encode("utf-8")
 
-    def test_cli_rejects_non_finite_large_file_threshold(self) -> None:
-        result = subprocess.run(
-            [sys.executable, str(MODULE_PATH), ".", "--large-file-mib", "nan"],
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=10,
+    def test_cli_preflights_all_collection_options_before_writing_output(self) -> None:
+        cases = (
+            ("max-files", ("--max-files", "0"), "--max-files must be positive"),
+            ("large-nan", ("--large-file-mib", "nan"), "--large-file-mib must be positive"),
+            ("large-infinity", ("--large-file-mib", "inf"), "--large-file-mib must be positive"),
+            ("large-zero", ("--large-file-mib", "0"), "--large-file-mib must be positive"),
+            ("large-negative", ("--large-file-mib", "-1"), "--large-file-mib must be positive"),
+            ("large-overflow", ("--large-file-mib", "1e308"), "--large-file-mib is too large"),
+            ("include", ("--include-path", "../secret/*"), "path patterns"),
+            ("exclude", ("--exclude-path", "/absolute/*"), "path patterns"),
+            ("scope", ("--scope-id", "   "), "--scope-id"),
         )
+        for label, arguments, message in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir, "repository")
+                root.mkdir()
+                root.joinpath("README.md").write_text("# Example\n", encoding="utf-8")
+                output = Path(temp_dir, "collector-output.json")
+                original = b"preserve collector output\n"
+                output.write_bytes(original)
 
-        self.assertEqual(result.returncode, 2)
-        self.assertIn("must be positive", result.stderr)
-        self.assertNotIn("Traceback", result.stderr)
+                result = subprocess.run(
+                    [sys.executable, str(MODULE_PATH), str(root), *arguments, "--output", str(output)],
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=10,
+                )
 
-        huge = subprocess.run(
-            [sys.executable, str(MODULE_PATH), ".", "--large-file-mib", "1e308"],
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=10,
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(message, result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertEqual(output.read_bytes(), original)
+
+    def test_cli_preflights_collection_target_before_writing_output(self) -> None:
+        cases = (
+            ("missing-root", "filesystem", "not a directory"),
+            ("tracked-non-git", "tracked", "requires a Git working tree"),
         )
-        self.assertEqual(huge.returncode, 2)
-        self.assertIn("too large", huge.stderr)
-        self.assertNotIn("Traceback", huge.stderr)
+        for label, scan_mode, message in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir, "repository")
+                if label == "tracked-non-git":
+                    root.mkdir()
+                    root.joinpath("README.md").write_text("# Example\n", encoding="utf-8")
+                output = Path(temp_dir, "collector-output.json")
+                original = b"preserve collector output\n"
+                output.write_bytes(original)
+
+                result = subprocess.run(
+                    [
+                        sys.executable, str(MODULE_PATH), str(root),
+                        "--scan-mode", scan_mode, "--output", str(output),
+                    ],
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=10,
+                )
+
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(message, result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertEqual(output.read_bytes(), original)
 
     def test_cli_reports_stdout_encoding_failure_without_traceback(self) -> None:
         environment = os.environ.copy()

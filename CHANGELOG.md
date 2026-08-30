@@ -2,6 +2,23 @@
 
 All notable changes to `audit-repo` are documented here. The project follows semantic versioning.
 
+## [1.10.1] - 2026-08-31
+
+### Changed
+
+- Centralize validation and normalization of file limits, large-file thresholds, path globs, and logical scope IDs so the one-command runner and collector use the same rules.
+- Share scan-root and Git-worktree eligibility preflight between the runner and collector, and perform all shared preflight checks before the runner allocates an Action temporary directory, creates or clears managed output, or appends GitHub Action outputs.
+- Forward paths, scope IDs, globs, and exclusion names as single option tokens so valid values beginning with `-` are not reinterpreted as command-line options.
+
+### Security
+
+- Preserve existing reports and Action state for preflight-invalid collection requests, including malformed settings, an unavailable root, and a Git scan requested for a non-Git directory.
+- Normalize every nonzero collector subprocess status to runner exit code `2`, keeping collector execution failures distinct from exit code `1` policy-gate results.
+- Exercise representative numeric, path-pattern, and scope rejections in the Linux, Windows, and macOS composite-Action policy matrix.
+- Document that concurrent repository writers can invalidate multi-step filesystem observations, and require a quiescent or isolated checkout for an evidence-grade audit.
+
+Snapshot schema 1 and scan semantics 3 are unchanged. This patch changes invalid-input failure timing and the recorded collector version, not scan-signal semantics or comparability for valid settings.
+
 ## [1.10.0] - 2026-08-31
 
 ### Added
@@ -222,6 +239,7 @@ Because file classification changed, snapshots created before v1.9.0 have a diff
 
 - First stable release of the Codex Skill, repository signal collector, snapshot comparer, tests, and CI.
 
+[1.10.1]: https://github.com/1838904818/audit-repo/compare/v1.10.0...v1.10.1
 [1.10.0]: https://github.com/1838904818/audit-repo/compare/v1.9.1...v1.10.0
 [1.9.1]: https://github.com/1838904818/audit-repo/compare/v1.9.0...v1.9.1
 [1.9.0]: https://github.com/1838904818/audit-repo/compare/v1.8.2...v1.9.0

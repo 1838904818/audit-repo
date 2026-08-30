@@ -57,17 +57,26 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def run(command: list[str]) -> int:
+def collect_snapshot(command: list[str]) -> tuple[int, bytes | None, dict[str, object] | None]:
     try:
-        return subprocess.run(command, check=False).returncode
+        completed = subprocess.run(command, check=False, stdout=subprocess.PIPE)
     except OSError as error:
         print(f"error: could not start audit tool: {error}", file=sys.stderr)
-        return 2
+        return 2, None, None
+    if completed.returncode != 0:
+        print(f"error: audit collector failed with exit status {completed.returncode}", file=sys.stderr)
+        return 2, None, None
+    try:
+        snapshot = comparer.load_snapshot_bytes(completed.stdout, Path("<collector stdout>"))
+    except comparer.SnapshotError as error:
+        print(f"error: could not parse collector JSON: {error}", file=sys.stderr)
+        return 2, None, None
+    return 0, completed.stdout, snapshot
 
 
 def append_values(command: list[str], option: str, values: list[str]) -> None:
     for value in values:
-        command.extend((option, value))
+        command.append(f"{option}={value}")
 
 
 def write_github_outputs(path: Path, values: dict[str, str]) -> bool:
@@ -92,6 +101,15 @@ def write_text(path: Path, content: str, label: str) -> bool:
     try:
         path.write_text(content, encoding="utf-8")
     except (OSError, UnicodeError) as error:
+        print(f"error: could not write {label}: {error}", file=sys.stderr)
+        return False
+    return True
+
+
+def write_bytes(path: Path, content: bytes, label: str) -> bool:
+    try:
+        path.write_bytes(content)
+    except OSError as error:
         print(f"error: could not write {label}: {error}", file=sys.stderr)
         return False
     return True
@@ -212,11 +230,30 @@ def main() -> int:
     if args.baseline_sha256 is not None and SHA256_RE.fullmatch(args.baseline_sha256) is None:
         print("error: --baseline-sha256 must be exactly 64 hexadecimal characters", file=sys.stderr)
         return 2
+    try:
+        _, include_paths, exclude_paths, scope_id = collector.validate_collection_options(
+            args.max_files,
+            args.large_file_mib,
+            include_paths=args.include_path,
+            exclude_paths=args.exclude_path,
+            scope_id=args.scope_id,
+        )
+    except collector.CollectionError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
     temporary_output_parent = None
     output_dir = None
     try:
         repository_candidate = absolute_without_symlink_resolution(Path(args.path))
-        repository = repository_candidate.resolve()
+    except (OSError, RuntimeError, ValueError) as error:
+        print(f"error: could not resolve an input path: {error}", file=sys.stderr)
+        return 2
+    try:
+        repository = collector.validate_collection_target(repository_candidate, args.scan_mode)
+    except collector.CollectionError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    try:
         untrusted_output_boundaries = tuple({
             repository,
             collector.git_worktree_boundary(repository_candidate),
@@ -320,25 +357,30 @@ def main() -> int:
         return 2
 
     common = [
-        str(repository_candidate), "--scan-mode", args.scan_mode,
-        "--max-files", str(args.max_files), "--large-file-mib", str(args.large_file_mib),
+        f"--scan-mode={args.scan_mode}",
+        f"--max-files={args.max_files}",
+        f"--large-file-mib={args.large_file_mib}",
     ]
-    if args.scope_id is not None:
-        common.extend(("--scope-id", args.scope_id))
-    append_values(common, "--include-path", args.include_path)
-    append_values(common, "--exclude-path", args.exclude_path)
+    if scope_id is not None:
+        common.append(f"--scope-id={scope_id}")
+    append_values(common, "--include-path", include_paths)
+    append_values(common, "--exclude-path", exclude_paths)
     append_values(common, "--exclude-dir", args.exclude_dir)
 
-    collect_json = [sys.executable, "-I", str(COLLECTOR), *common, "--format", "json", "--output", str(snapshot)]
-    status = run(collect_json)
-    if status != 0:
+    collect_json = [
+        sys.executable, "-I", str(COLLECTOR), *common,
+        "--format=json", "--", str(repository_candidate),
+    ]
+    status, snapshot_bytes, snapshot_data = collect_snapshot(collect_json)
+    if status != 0 or snapshot_bytes is None or snapshot_data is None:
         return status
     try:
-        snapshot_data = comparer.load_snapshot(snapshot)
         tool_version = str(snapshot_data["tool_version"])
         scan_semantics_version = str(snapshot_data["scan_semantics_version"])
-    except (comparer.SnapshotError, KeyError, TypeError) as error:
+    except (KeyError, TypeError) as error:
         print(f"error: could not read generated snapshot provenance: {error}", file=sys.stderr)
+        return 2
+    if not write_bytes(snapshot, snapshot_bytes, "snapshot JSON"):
         return 2
 
     attention_count = "0"

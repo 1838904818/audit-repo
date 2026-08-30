@@ -99,7 +99,7 @@ TOOL_CONFIG_NAMES = {
 }
 LARGE_FILE_BYTES = 5 * 1024 * 1024
 SCHEMA_VERSION = 1
-TOOL_VERSION = "1.10.0"
+TOOL_VERSION = "1.10.1"
 SCAN_SEMANTICS_VERSION = 3
 DISABLED_GIT_HOOKS_PATH = Path(__file__).resolve().as_posix()
 SCAN_MODES = {"filesystem", "git-visible", "tracked"}
@@ -159,6 +159,32 @@ def normalize_scope_id(scope_id: str | None) -> str | None:
     ):
         raise CollectionError("--scope-id must be 1-200 characters without control characters")
     return scope_id
+
+
+def validate_collection_options(
+    max_files: int,
+    large_file_mib: float,
+    include_paths: Iterable[str] = (),
+    exclude_paths: Iterable[str] = (),
+    scope_id: str | None = None,
+) -> tuple[int, list[str], list[str], str | None]:
+    """Validate and normalize collection options before any output side effect."""
+    if max_files < 1:
+        raise CollectionError("--max-files must be positive")
+    if not math.isfinite(large_file_mib) or large_file_mib <= 0:
+        raise CollectionError("--large-file-mib must be positive")
+    threshold_bytes = large_file_mib * 1_048_576
+    if not math.isfinite(threshold_bytes):
+        raise CollectionError("--large-file-mib is too large")
+    included_patterns = normalize_path_patterns(include_paths)
+    excluded_patterns = normalize_path_patterns(exclude_paths)
+    normalized_scope_id = normalize_scope_id(scope_id)
+    return (
+        max(1, int(threshold_bytes)),
+        included_patterns,
+        excluded_patterns,
+        normalized_scope_id,
+    )
 
 
 def path_selected(relative_path: str, include_paths: Iterable[str], exclude_paths: Iterable[str]) -> bool:
@@ -373,6 +399,47 @@ def git_environment() -> dict[str, str]:
     environment["GIT_PAGER"] = "cat"
     environment["GIT_TERMINAL_PROMPT"] = "0"
     return environment
+
+
+def validate_collection_target(
+    root_candidate: Path,
+    scan_mode: str,
+    git_untrusted_roots: Iterable[Path] = (),
+) -> Path:
+    """Resolve and validate the collection target without changing repository state."""
+    try:
+        root = root_candidate.resolve()
+    except (OSError, RuntimeError, ValueError) as error:
+        raise CollectionError(f"could not resolve the scan root: {error}") from error
+    if not root.is_dir():
+        raise CollectionError(f"not a directory: {root}")
+    if scan_mode not in SCAN_MODES:
+        raise CollectionError(f"unsupported scan mode: {scan_mode}")
+    if scan_mode == "filesystem":
+        return root
+
+    untrusted_roots = (root_candidate, *tuple(git_untrusted_roots))
+    git_executable = resolve_git_executable(root, untrusted_roots)
+    if git_executable is None:
+        raise CollectionError("Git is required for the requested scan mode")
+    try:
+        result = subprocess.run(
+            git_command(git_executable, root, "rev-parse", "--is-inside-work-tree"),
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            env=git_environment(),
+        )
+    except FileNotFoundError as error:
+        raise CollectionError("Git is required for the requested scan mode") from error
+    except OSError as error:
+        raise CollectionError(f"could not run Git working-tree validation: {error}") from error
+    except subprocess.TimeoutExpired as error:
+        raise CollectionError("Git working-tree validation timed out") from error
+    if result.returncode != 0 or result.stdout.strip() != b"true":
+        raise CollectionError(f"--scan-mode {scan_mode} requires a Git working tree")
+    return root
 
 
 def git_file_names(
@@ -723,13 +790,8 @@ def collect(
     git_untrusted_roots: Iterable[Path] = (),
 ) -> dict[str, Any]:
     root_candidate = root
-    try:
-        root = root_candidate.resolve()
-    except (OSError, RuntimeError) as error:
-        raise CollectionError(f"could not resolve the scan root: {error}") from error
+    root = validate_collection_target(root_candidate, scan_mode, git_untrusted_roots)
     untrusted_roots = (root_candidate, *tuple(git_untrusted_roots))
-    if scan_mode not in SCAN_MODES:
-        raise CollectionError(f"unsupported scan mode: {scan_mode}")
     if max_files < 1:
         raise CollectionError("--max-files must be positive")
     excluded = sorted({name.lower() for name in exclude_dirs})
@@ -1020,34 +1082,31 @@ def to_json(data: dict[str, Any]) -> str:
 def main() -> int:
     args = parse_args()
     try:
+        large_file_bytes, include_paths, exclude_paths, scope_id = validate_collection_options(
+            args.max_files,
+            args.large_file_mib,
+            include_paths=args.include_path,
+            exclude_paths=args.exclude_path,
+            scope_id=args.scope_id,
+        )
+    except CollectionError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    try:
         root_candidate = absolute_without_symlink_resolution(Path(args.path))
-        root = root_candidate.resolve()
     except (OSError, RuntimeError, ValueError) as error:
         print(f"error: could not resolve the scan root: {error}", file=sys.stderr)
-        return 2
-    if not root.is_dir():
-        print(f"error: not a directory: {root}", file=sys.stderr)
-        return 2
-    if args.max_files < 1:
-        print("error: --max-files must be positive", file=sys.stderr)
-        return 2
-    if not math.isfinite(args.large_file_mib) or args.large_file_mib <= 0:
-        print("error: --large-file-mib must be positive", file=sys.stderr)
-        return 2
-    threshold_bytes = args.large_file_mib * 1_048_576
-    if not math.isfinite(threshold_bytes):
-        print("error: --large-file-mib is too large", file=sys.stderr)
         return 2
     try:
         data = collect(
             root_candidate,
             args.max_files,
             exclude_dirs=args.exclude_dir,
-            large_file_bytes=max(1, int(threshold_bytes)),
+            large_file_bytes=large_file_bytes,
             scan_mode=args.scan_mode,
-            include_paths=args.include_path,
-            exclude_paths=args.exclude_path,
-            scope_id=args.scope_id,
+            include_paths=include_paths,
+            exclude_paths=exclude_paths,
+            scope_id=scope_id,
         )
     except CollectionError as error:
         print(f"error: {error}", file=sys.stderr)

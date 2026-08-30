@@ -202,6 +202,44 @@ jobs:
           assert sarif["runs"][0]["results"] == []
           PY
 
+      - name: Exercise leading-hyphen Action input values
+        id: leading_hyphen_inputs
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/audit repo action fixture
+          output-dir: ${{ runner.temp }}/audit repo leading hyphen output
+          scan-mode: filesystem
+          scope-id: --scope:action-e2e
+          include-paths: |
+            *
+            --include-probe/**
+          exclude-paths: |
+            --exclude-probe/**
+          exclude-dirs: |
+            --cache
+
+      - name: Verify leading-hyphen inputs reach the collector unchanged
+        shell: bash
+        env:
+          OUTPUT_DIR: ${{ runner.temp }}/audit repo leading hyphen output
+          ACTION_SNAPSHOT: ${{ steps.leading_hyphen_inputs.outputs.snapshot }}
+        run: |
+          python -I - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          output_dir = Path(os.environ["OUTPUT_DIR"]).resolve()
+          snapshot_path = Path(os.environ["ACTION_SNAPSHOT"]).resolve()
+          assert snapshot_path == output_dir / "snapshot.json"
+          snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+          assert snapshot["scope_id"] == "--scope:action-e2e"
+          assert snapshot["include_path_patterns"] == ["*", "--include-probe/**"]
+          assert snapshot["exclude_path_patterns"] == ["--exclude-probe/**"]
+          assert snapshot["excluded_directory_names"] == ["--cache"]
+          assert snapshot["file_count"] == 1
+          PY
+
       - name: Add a sensitive-looking file after the baseline
         shell: bash
         env:
@@ -472,6 +510,241 @@ jobs:
           )
           after = sorted(path.name for path in default_parent.glob("audit-repo-*"))
           assert after == before, (before, after)
+          PY
+
+      - name: Seed invalid collection-input rejection outputs
+        id: invalid_collection_seed
+        shell: bash
+        env:
+          MAX_FILES_DIR: ${{ runner.temp }}/audit repo invalid max files output
+          LARGE_FILE_DIR: ${{ runner.temp }}/audit repo invalid large file output
+          INCLUDE_DIR: ${{ runner.temp }}/audit repo invalid include output
+          EXCLUDE_DIR: ${{ runner.temp }}/audit repo invalid exclude output
+          SCOPE_DIR: ${{ runner.temp }}/audit repo invalid scope output
+          NON_GIT_DIR: ${{ runner.temp }}/audit repo non git tracked output
+          MISSING_ROOT: ${{ runner.temp }}/audit repo missing root
+          DEFAULT_PARENT: ${{ runner.temp }}
+        run: |
+          python -I - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          explicit_directories = (
+              "MAX_FILES_DIR", "LARGE_FILE_DIR", "INCLUDE_DIR",
+              "EXCLUDE_DIR", "SCOPE_DIR", "NON_GIT_DIR",
+          )
+
+          def tree_state(root):
+              state = {}
+              for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
+                  relative = path.relative_to(root).as_posix()
+                  if path.is_dir():
+                      state[relative] = {"kind": "directory"}
+                  else:
+                      state[relative] = {"kind": "file", "bytes": path.read_bytes().hex()}
+              return state
+
+          before = {"explicit": {}}
+          for directory_index, environment_name in enumerate(explicit_directories, start=1):
+              output_dir = Path(os.environ[environment_name])
+              output_dir.mkdir()
+              output_dir.joinpath("keep").mkdir()
+              names = (
+                  "sentinel.bin", "snapshot.json", "report.md",
+                  "comparison.json", "comparison.sarif", "keep/nested.bin",
+              )
+              for file_index, name in enumerate(names, start=1):
+                  payload = bytes((0, directory_index, file_index, 255)) + f"preserve:{environment_name}:{name}\r\n".encode()
+                  output_dir.joinpath(name).write_bytes(payload)
+              before["explicit"][environment_name] = tree_state(output_dir)
+
+          missing_root = Path(os.environ["MISSING_ROOT"])
+          assert not missing_root.exists(), missing_root
+          default_parent = Path(os.environ["DEFAULT_PARENT"])
+          before["default_entries"] = sorted(
+              path.name for path in default_parent.glob("audit-repo-*")
+          )
+          default_parent.joinpath("invalid-collection-before.json").write_text(
+              json.dumps(before, sort_keys=True), encoding="utf-8",
+          )
+          invalid_scope = "s" * 201
+          assert len(invalid_scope) == 201
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8", newline="\n") as stream:
+              stream.write(f"invalid_scope={invalid_scope}\n")
+          PY
+
+      - name: Expected failure - max-files must be positive
+        id: invalid_max_files_explicit
+        continue-on-error: true
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/audit repo action fixture
+          output-dir: ${{ runner.temp }}/audit repo invalid max files output
+          scan-mode: filesystem
+          scope-id: ${{ github.repository }}:invalid-input-e2e
+          max-files: "0"
+
+      - name: Expected failure - large-file-mib must be finite
+        id: invalid_large_file_explicit
+        continue-on-error: true
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/audit repo action fixture
+          output-dir: ${{ runner.temp }}/audit repo invalid large file output
+          scan-mode: filesystem
+          scope-id: ${{ github.repository }}:invalid-input-e2e
+          large-file-mib: "nan"
+
+      - name: Expected failure - include paths reject parent traversal
+        id: invalid_include_explicit
+        continue-on-error: true
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/audit repo action fixture
+          output-dir: ${{ runner.temp }}/audit repo invalid include output
+          scan-mode: filesystem
+          scope-id: ${{ github.repository }}:invalid-input-e2e
+          include-paths: |
+            README.md
+            ../escape/**
+
+      - name: Expected failure - exclude paths reject parent traversal
+        id: invalid_exclude_explicit
+        continue-on-error: true
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/audit repo action fixture
+          output-dir: ${{ runner.temp }}/audit repo invalid exclude output
+          scan-mode: filesystem
+          scope-id: ${{ github.repository }}:invalid-input-e2e
+          exclude-paths: |
+            ignored/**
+            ../escape/**
+
+      - name: Expected failure - scope ID length is bounded
+        id: invalid_scope_explicit
+        continue-on-error: true
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/audit repo action fixture
+          output-dir: ${{ runner.temp }}/audit repo invalid scope output
+          scan-mode: filesystem
+          scope-id: ${{ steps.invalid_collection_seed.outputs.invalid_scope }}
+
+      - name: Expected failure - tracked mode requires a Git worktree
+        id: non_git_tracked_explicit
+        continue-on-error: true
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/audit repo action fixture
+          output-dir: ${{ runner.temp }}/audit repo non git tracked output
+          scan-mode: tracked
+          scope-id: ${{ github.repository }}:invalid-input-e2e
+
+      - name: Expected failure - invalid max-files allocates no default output
+        id: invalid_max_files_default
+        continue-on-error: true
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/audit repo action fixture
+          scan-mode: filesystem
+          scope-id: ${{ github.repository }}:invalid-input-e2e
+          max-files: "0"
+
+      - name: Expected failure - missing root allocates no default output
+        id: missing_root_default
+        continue-on-error: true
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/audit repo missing root
+          scan-mode: filesystem
+          scope-id: ${{ github.repository }}:invalid-input-e2e
+
+      - name: Verify invalid collection inputs preserve all Action state
+        shell: bash
+        env:
+          MAX_FILES_OUTCOME: ${{ steps.invalid_max_files_explicit.outcome }}
+          LARGE_FILE_OUTCOME: ${{ steps.invalid_large_file_explicit.outcome }}
+          INCLUDE_OUTCOME: ${{ steps.invalid_include_explicit.outcome }}
+          EXCLUDE_OUTCOME: ${{ steps.invalid_exclude_explicit.outcome }}
+          SCOPE_OUTCOME: ${{ steps.invalid_scope_explicit.outcome }}
+          NON_GIT_OUTCOME: ${{ steps.non_git_tracked_explicit.outcome }}
+          DEFAULT_MAX_OUTCOME: ${{ steps.invalid_max_files_default.outcome }}
+          MISSING_ROOT_OUTCOME: ${{ steps.missing_root_default.outcome }}
+          MAX_FILES_OUTPUTS: ${{ toJSON(steps.invalid_max_files_explicit.outputs) }}
+          LARGE_FILE_OUTPUTS: ${{ toJSON(steps.invalid_large_file_explicit.outputs) }}
+          INCLUDE_OUTPUTS: ${{ toJSON(steps.invalid_include_explicit.outputs) }}
+          EXCLUDE_OUTPUTS: ${{ toJSON(steps.invalid_exclude_explicit.outputs) }}
+          SCOPE_OUTPUTS: ${{ toJSON(steps.invalid_scope_explicit.outputs) }}
+          NON_GIT_OUTPUTS: ${{ toJSON(steps.non_git_tracked_explicit.outputs) }}
+          DEFAULT_MAX_OUTPUTS: ${{ toJSON(steps.invalid_max_files_default.outputs) }}
+          MISSING_ROOT_OUTPUTS: ${{ toJSON(steps.missing_root_default.outputs) }}
+          MAX_FILES_DIR: ${{ runner.temp }}/audit repo invalid max files output
+          LARGE_FILE_DIR: ${{ runner.temp }}/audit repo invalid large file output
+          INCLUDE_DIR: ${{ runner.temp }}/audit repo invalid include output
+          EXCLUDE_DIR: ${{ runner.temp }}/audit repo invalid exclude output
+          SCOPE_DIR: ${{ runner.temp }}/audit repo invalid scope output
+          NON_GIT_DIR: ${{ runner.temp }}/audit repo non git tracked output
+          MISSING_ROOT: ${{ runner.temp }}/audit repo missing root
+          DEFAULT_PARENT: ${{ runner.temp }}
+        run: |
+          python -I - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          outcome_names = (
+              "MAX_FILES_OUTCOME", "LARGE_FILE_OUTCOME", "INCLUDE_OUTCOME",
+              "EXCLUDE_OUTCOME", "SCOPE_OUTCOME", "NON_GIT_OUTCOME",
+              "DEFAULT_MAX_OUTCOME", "MISSING_ROOT_OUTCOME",
+          )
+          for outcome_name in outcome_names:
+              assert os.environ[outcome_name] == "failure", (outcome_name, os.environ[outcome_name])
+
+          public_outputs = {
+              "snapshot", "report", "comparison", "sarif", "attention-count", "comparable",
+              "tool-version", "scan-semantics-version",
+          }
+          output_names = (
+              "MAX_FILES_OUTPUTS", "LARGE_FILE_OUTPUTS", "INCLUDE_OUTPUTS",
+              "EXCLUDE_OUTPUTS", "SCOPE_OUTPUTS", "NON_GIT_OUTPUTS",
+              "DEFAULT_MAX_OUTPUTS", "MISSING_ROOT_OUTPUTS",
+          )
+          for outputs_name in output_names:
+              outputs = json.loads(os.environ[outputs_name])
+              assert isinstance(outputs, dict), (outputs_name, outputs)
+              assert set(outputs).issubset(public_outputs), (outputs_name, outputs)
+              assert all(outputs.get(name) in ("", None) for name in public_outputs), (outputs_name, outputs)
+
+          def tree_state(root):
+              state = {}
+              for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
+                  relative = path.relative_to(root).as_posix()
+                  if path.is_dir():
+                      state[relative] = {"kind": "directory"}
+                  else:
+                      state[relative] = {"kind": "file", "bytes": path.read_bytes().hex()}
+              return state
+
+          default_parent = Path(os.environ["DEFAULT_PARENT"])
+          before = json.loads(
+              default_parent.joinpath("invalid-collection-before.json").read_text(encoding="utf-8")
+          )
+          explicit_directories = (
+              "MAX_FILES_DIR", "LARGE_FILE_DIR", "INCLUDE_DIR",
+              "EXCLUDE_DIR", "SCOPE_DIR", "NON_GIT_DIR",
+          )
+          for environment_name in explicit_directories:
+              output_dir = Path(os.environ[environment_name])
+              actual = tree_state(output_dir)
+              expected = before["explicit"][environment_name]
+              assert actual == expected, (environment_name, expected, actual)
+
+          after = sorted(path.name for path in default_parent.glob("audit-repo-*"))
+          assert after == before["default_entries"], (before["default_entries"], after)
+          missing_root = Path(os.environ["MISSING_ROOT"])
+          assert not missing_root.exists(), missing_root
           PY
 
       - name: Seed invalid-boolean sentinel

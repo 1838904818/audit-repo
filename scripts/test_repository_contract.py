@@ -90,8 +90,12 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertTrue(action_versions)
         self.assertEqual(set(action_versions), {version})
         self.assertRegex(changelog, rf"(?s)\A# Changelog\n\n.*?\n## \[{re.escape(version)}\] - ")
+        changelog_versions = re.findall(r"(?m)^## \[([0-9]+\.[0-9]+\.[0-9]+)\] - ", changelog)
+        self.assertGreaterEqual(len(changelog_versions), 2)
+        self.assertEqual(changelog_versions[0], version)
+        previous_version = changelog_versions[1]
         self.assertIn(
-            f"[{version}]: https://github.com/1838904818/audit-repo/compare/v1.9.1...v{version}",
+            f"[{version}]: https://github.com/1838904818/audit-repo/compare/v{previous_version}...v{version}",
             changelog,
         )
         self.assertIn("--baseline-sha256", readme)
@@ -121,7 +125,7 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertRegex(action, r'(?ms)^  output-dir:\s*\n.*?^    default: ""\s*$')
         self.assertRegex(action, r'(?ms)^  baseline-sha256:\s*\n.*?^    default: ""\s*$')
         self.assertIn('if [[ -n "$AUDIT_SCOPE_ID" ]]', action)
-        self.assertIn('args+=(--temporary-output-parent "$RUNNER_TEMP")', action)
+        self.assertIn('args+=("--temporary-output-parent=$RUNNER_TEMP")', action)
         self.assertNotIn("tempfile.mkdtemp", action)
         self.assertNotIn('AUDIT_OUTPUT_DIR="$(python', action)
         self.assertIn('python -I "$GITHUB_ACTION_PATH/scripts/check_repo.py"', action)
@@ -131,11 +135,14 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("A comparison gate requires a non-empty baseline", action)
         self.assertIn("baseline-sha256 requires a non-empty baseline", action)
         self.assertIn("baseline-sha256 must be exactly 64 hexadecimal characters", action)
-        self.assertIn('args+=(--baseline-sha256 "$AUDIT_BASELINE_SHA256")', action)
+        self.assertIn('args+=("--baseline-sha256=$AUDIT_BASELINE_SHA256")', action)
+        self.assertIn('args+=(-- "$AUDIT_PATH")', action)
         self.assertNotRegex(action, r'(?m)^\s*args=\([^\n]*--scope-id')
         self.assertIn('baseline_bytes = path.read_bytes()', runner)
         self.assertIn('hashlib.sha256(baseline_bytes).hexdigest()', runner)
         self.assertIn('comparer.load_snapshot_bytes(baseline_bytes, path)', runner)
+        self.assertIn('comparer.load_snapshot_bytes(completed.stdout, Path("<collector stdout>"))', runner)
+        self.assertNotIn("comparer.load_snapshot(snapshot)", runner)
         self.assertIn('result = comparer.compare(baseline_data, snapshot_data)', runner)
         self.assertNotIn('COMPARER =', runner)
         self.assertLess(runner.index("baseline_data = load_baseline"), runner.index("tempfile.mkdtemp"))
@@ -234,7 +241,24 @@ class RepositoryContractTests(unittest.TestCase):
         ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         self.assertIn("action-policy-e2e:", ci)
         self.assertIn("audit repo action fixture", ci)
-        self.assertEqual(ci.count("continue-on-error: true"), 9)
+        self.assertIn("id: leading_hyphen_inputs", ci)
+        self.assertIn("scope-id: --scope:action-e2e", ci)
+        self.assertIn('snapshot["include_path_patterns"] == ["*", "--include-probe/**"]', ci)
+        expected_failure_steps = (
+            "attention_gate", "comparable_gate", "missing_baseline_gate",
+            "digest_without_baseline", "malformed_digest", "digest_mismatch",
+            "digest_mismatch_default", "invalid_max_files_explicit",
+            "invalid_large_file_explicit", "invalid_include_explicit",
+            "invalid_exclude_explicit", "invalid_scope_explicit",
+            "non_git_tracked_explicit", "invalid_max_files_default",
+            "missing_root_default", "invalid_boolean", "managed_output_collision",
+        )
+        for step_id in expected_failure_steps:
+            self.assertEqual(ci.count(f"id: {step_id}\n"), 1)
+            self.assertRegex(
+                ci,
+                rf"(?m)^        id: {re.escape(step_id)}\n        continue-on-error: true$",
+            )
         isolated_heredocs = ci.count("python -I - <<'PY'")
         self.assertGreater(isolated_heredocs, 0)
         self.assertEqual(isolated_heredocs, ci.count("<<'PY'"))
@@ -253,6 +277,10 @@ class RepositoryContractTests(unittest.TestCase):
             self.assertIn(f"{environment_name}: ${{{{ steps.{step_id}.outcome }}}}", ci)
             outputs_name = environment_name.replace("_OUTCOME", "_OUTPUTS")
             self.assertIn(f"{outputs_name}: ${{{{ toJSON(steps.{step_id}.outputs) }}}}", ci)
+        for step_id in expected_failure_steps[7:15]:
+            self.assertIn(f"steps.{step_id}.outcome", ci)
+            self.assertIn(f"toJSON(steps.{step_id}.outputs)", ci)
+        self.assertIn('default_parent.joinpath("invalid-collection-before.json")', ci)
         self.assertEqual(
             ci.count("baseline-sha256: ${{ steps.baseline_digest.outputs.sha256 }}"), 4,
         )
