@@ -170,19 +170,26 @@ def validate_snapshot(raw: dict[str, Any], path: Path) -> None:
         raise SnapshotError(f"snapshot is missing required collector fields in {path}: {', '.join(missing_fields)}")
 
 
-def load_snapshot(path: Path) -> dict[str, Any]:
+def load_snapshot_bytes(content: bytes, path: Path) -> dict[str, Any]:
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"), parse_constant=reject_json_constant)
-    except OSError as error:
-        raise SnapshotError(f"could not read {path}: {error}") from error
+        text = content.decode("utf-8")
+        raw = json.loads(text, parse_constant=reject_json_constant)
     except SnapshotError:
         raise
-    except (ValueError, RecursionError) as error:
+    except (UnicodeError, ValueError, RecursionError) as error:
         raise SnapshotError(f"invalid JSON in {path}: {error}") from error
     if not isinstance(raw, dict):
         raise SnapshotError(f"snapshot must be a JSON object: {path}")
     validate_snapshot(raw, path)
     return raw
+
+
+def load_snapshot(path: Path) -> dict[str, Any]:
+    try:
+        content = path.read_bytes()
+    except OSError as error:
+        raise SnapshotError(f"could not read {path}: {error}") from error
+    return load_snapshot_bytes(content, path)
 
 
 def string_set(data: dict[str, Any], field: str) -> set[str]:

@@ -13,6 +13,7 @@ Produce a useful repository audit without changing the repository. Combine deter
 - Repository-provided tests, builds, package scripts, wrappers, hooks, and binaries can execute arbitrary code. Inspect the exact command, its definition, and its immediate call chain before running it. Do not assume a familiar command name is safe.
 - For an untrusted or unknown-origin repository, remain static-only by default. Do not run repository-provided code unless the user explicitly authorizes that execution and an appropriate isolated environment is available.
 - Never expose credentials to repository code. Skip any check that may read secrets, write outside the repository and designated output directory, contact the network or production services, or make persistent changes unless the user separately authorizes that effect and the environment contains the risk.
+- A matching `--baseline-sha256` proves only the baseline's exact bytes. Obtain the expected digest through an independent trusted channel; a digest calculated from the same untrusted checkout adds no protection and does not prove provenance, freshness, safety, or comparability.
 
 ## Workflow
 

@@ -99,7 +99,7 @@ TOOL_CONFIG_NAMES = {
 }
 LARGE_FILE_BYTES = 5 * 1024 * 1024
 SCHEMA_VERSION = 1
-TOOL_VERSION = "1.9.1"
+TOOL_VERSION = "1.10.0"
 SCAN_SEMANTICS_VERSION = 3
 DISABLED_GIT_HOOKS_PATH = Path(__file__).resolve().as_posix()
 SCAN_MODES = {"filesystem", "git-visible", "tracked"}

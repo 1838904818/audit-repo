@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -19,14 +22,26 @@ import collect_repo_signals as collector  # noqa: E402
 import compare_repo_signals as comparer  # noqa: E402
 
 COLLECTOR = SCRIPT_DIR / "collect_repo_signals.py"
-COMPARER = SCRIPT_DIR / "compare_repo_signals.py"
+SHA256_RE = re.compile(r"[0-9a-fA-F]{64}")
+
+
+class BaselineError(ValueError):
+    """Raised when a comparison baseline cannot be loaded safely."""
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("path", nargs="?", default=".", help="Repository directory (default: current directory)")
-    parser.add_argument("--output-dir", type=Path, default=Path("audit-repo-results"))
+    output_group = parser.add_mutually_exclusive_group()
+    output_group.add_argument(
+        "--output-dir", type=Path, help="Output directory (default: audit-repo-results)",
+    )
+    output_group.add_argument("--temporary-output-parent", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--baseline", type=Path, help="Earlier collector JSON snapshot")
+    parser.add_argument(
+        "--baseline-sha256",
+        help="Expected 64-hex SHA-256 of the baseline's exact bytes; requires --baseline",
+    )
     parser.add_argument("--scan-mode", choices=("filesystem", "git-visible", "tracked"), default="tracked")
     parser.add_argument(
         "--scope-id", help="Project-qualified logical scope ID for equivalent roots (unset by default)",
@@ -88,6 +103,25 @@ def paths_alias(first: Path, second: Path) -> bool:
     if not first.exists() or not second.exists():
         return False
     return os.path.samefile(first, second)
+
+
+def load_baseline(path: Path, expected_sha256: str | None) -> dict[str, object]:
+    try:
+        baseline_bytes = path.read_bytes()
+    except OSError as error:
+        raise BaselineError(f"could not read baseline {path}: {error}") from error
+    if expected_sha256 is not None:
+        actual_sha256 = hashlib.sha256(baseline_bytes).hexdigest()
+        normalized_expected = expected_sha256.lower()
+        if actual_sha256 != normalized_expected:
+            raise BaselineError(
+                "baseline SHA-256 mismatch "
+                f"(expected {normalized_expected}, got {actual_sha256})"
+            )
+    try:
+        return comparer.load_snapshot_bytes(baseline_bytes, path)
+    except comparer.SnapshotError as error:
+        raise BaselineError(str(error)) from error
 
 
 def clear_managed_outputs(paths: tuple[Path, ...]) -> bool:
@@ -172,6 +206,14 @@ def main() -> int:
     if enabled_gates and args.baseline is None:
         print(f"error: enabling {', '.join(enabled_gates)} requires --baseline", file=sys.stderr)
         return 2
+    if args.baseline_sha256 is not None and args.baseline is None:
+        print("error: --baseline-sha256 requires --baseline", file=sys.stderr)
+        return 2
+    if args.baseline_sha256 is not None and SHA256_RE.fullmatch(args.baseline_sha256) is None:
+        print("error: --baseline-sha256 must be exactly 64 hexadecimal characters", file=sys.stderr)
+        return 2
+    temporary_output_parent = None
+    output_dir = None
     try:
         repository_candidate = absolute_without_symlink_resolution(Path(args.path))
         repository = repository_candidate.resolve()
@@ -180,7 +222,11 @@ def main() -> int:
             collector.git_worktree_boundary(repository_candidate),
             collector.git_worktree_boundary(repository),
         })
-        output_candidate = absolute_without_symlink_resolution(args.output_dir)
+        requested_output = args.output_dir if args.output_dir is not None else Path("audit-repo-results")
+        if args.temporary_output_parent is not None:
+            output_candidate = absolute_without_symlink_resolution(args.temporary_output_parent)
+        else:
+            output_candidate = absolute_without_symlink_resolution(requested_output)
         unsafe_output_component = repository_output_redirect(untrusted_output_boundaries, output_candidate)
         if unsafe_output_component is not None:
             print(
@@ -188,11 +234,52 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 2
-        output_dir = output_candidate.resolve()
+        resolved_output_candidate = output_candidate.resolve()
+        if args.temporary_output_parent is not None:
+            temporary_output_parent = resolved_output_candidate
+            if any(
+                path_is_within(temporary_output_parent, boundary)
+                for boundary in untrusted_output_boundaries
+            ):
+                print(
+                    "error: temporary output parent must be outside the repository and containing Git worktree",
+                    file=sys.stderr,
+                )
+                return 2
+        else:
+            output_dir = resolved_output_candidate
         baseline = args.baseline.expanduser().resolve() if args.baseline else None
         github_output = args.github_output.expanduser().resolve() if args.github_output else None
     except (OSError, RuntimeError, ValueError) as error:
         print(f"error: could not resolve an input path: {error}", file=sys.stderr)
+        return 2
+
+    if baseline is not None and github_output is not None:
+        try:
+            baseline_aliases_github_output = paths_alias(baseline, github_output)
+        except OSError as error:
+            print(f"error: could not verify baseline and GitHub output isolation: {error}", file=sys.stderr)
+            return 2
+        if baseline_aliases_github_output:
+            print("error: GitHub output must not alias the baseline", file=sys.stderr)
+            return 2
+
+    baseline_data = None
+    if baseline is not None:
+        try:
+            baseline_data = load_baseline(baseline, args.baseline_sha256)
+        except BaselineError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
+
+    if temporary_output_parent is not None:
+        try:
+            output_dir = Path(tempfile.mkdtemp(prefix="audit-repo-", dir=temporary_output_parent))
+        except OSError as error:
+            print(f"error: could not create temporary output directory: {error}", file=sys.stderr)
+            return 2
+    if output_dir is None:
+        print("error: output directory was not selected", file=sys.stderr)
         return 2
 
     snapshot = output_dir / "snapshot.json"
@@ -224,15 +311,6 @@ def main() -> int:
         if github_output_aliases_generated:
             print("error: GitHub output must not alias any generated output", file=sys.stderr)
             return 2
-    if baseline is not None and github_output is not None:
-        try:
-            baseline_aliases_github_output = paths_alias(baseline, github_output)
-        except OSError as error:
-            print(f"error: could not verify baseline and GitHub output isolation: {error}", file=sys.stderr)
-            return 2
-        if baseline_aliases_github_output:
-            print("error: GitHub output must not alias the baseline", file=sys.stderr)
-            return 2
     try:
         output_dir.mkdir(parents=True, exist_ok=True)
     except OSError as error:
@@ -256,29 +334,27 @@ def main() -> int:
     if status != 0:
         return status
     try:
-        snapshot_data = json.loads(snapshot.read_text(encoding="utf-8"))
+        snapshot_data = comparer.load_snapshot(snapshot)
         tool_version = str(snapshot_data["tool_version"])
         scan_semantics_version = str(snapshot_data["scan_semantics_version"])
-    except (OSError, UnicodeError, ValueError, KeyError, TypeError) as error:
+    except (comparer.SnapshotError, KeyError, TypeError) as error:
         print(f"error: could not read generated snapshot provenance: {error}", file=sys.stderr)
         return 2
 
     attention_count = "0"
     comparable = ""
     if baseline is not None:
-        compare_json = [
-            sys.executable, "-I", str(COMPARER), str(baseline), str(snapshot),
-            "--format", "json", "--output", str(comparison),
-        ]
-        status = run(compare_json)
-        if status != 0:
-            return status
         try:
-            result = json.loads(comparison.read_text(encoding="utf-8"))
+            if baseline_data is None:
+                raise comparer.SnapshotError("baseline was not loaded")
+            result = comparer.compare(baseline_data, snapshot_data)
+            comparison_text = json.dumps(result, indent=2, ensure_ascii=True) + "\n"
+            if not write_text(comparison, comparison_text, "comparison JSON"):
+                return 2
             attention_count = str(result["summary"]["attention_count"])
             comparable = str(bool(result["summary"]["comparable"])).lower()
-        except (OSError, UnicodeError, ValueError, KeyError, TypeError) as error:
-            print(f"error: could not read generated comparison: {error}", file=sys.stderr)
+        except (comparer.SnapshotError, KeyError, TypeError) as error:
+            print(f"error: could not compare snapshots: {error}", file=sys.stderr)
             return 2
         if not write_text(report, comparer.to_markdown(result), "Markdown report"):
             return 2

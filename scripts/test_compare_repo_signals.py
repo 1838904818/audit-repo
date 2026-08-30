@@ -56,6 +56,22 @@ def snapshot(**overrides: object) -> dict[str, object]:
 
 
 class CompareRepoSignalsTests(unittest.TestCase):
+    def test_load_snapshot_bytes_uses_strict_utf8_and_shared_validation(self) -> None:
+        path = Path("approved-baseline.json")
+        content = json.dumps(snapshot(), ensure_ascii=True).encode("utf-8")
+
+        self.assertEqual(MODULE.load_snapshot_bytes(content, path), snapshot())
+        for label, invalid in (
+            ("utf-16", json.dumps(snapshot()).encode("utf-16")),
+            ("utf-8-bom", b"\xef\xbb\xbf" + content),
+            ("invalid-json", b"{"),
+            ("invalid-schema", b'{"schema_version":999}'),
+        ):
+            with self.subTest(label=label), self.assertRaisesRegex(
+                MODULE.SnapshotError, "approved-baseline.json",
+            ):
+                MODULE.load_snapshot_bytes(invalid, path)
+
     def test_reports_high_confidence_attention_items(self) -> None:
         before = snapshot()
         after = snapshot(

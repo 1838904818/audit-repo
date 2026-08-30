@@ -76,13 +76,28 @@ class RepositoryContractTests(unittest.TestCase):
         for mojibake_marker in ("涓枃", "锛", "€"):
             self.assertNotIn(mojibake_marker, readme)
 
-    def test_readme_package_example_matches_runtime_version(self) -> None:
+    def test_public_examples_and_changelog_match_runtime_version(self) -> None:
         collector = (ROOT / "scripts" / "collect_repo_signals.py").read_text(encoding="utf-8")
         version_match = re.search(r'(?m)^TOOL_VERSION = "([^"]+)"\s*$', collector)
         self.assertIsNotNone(version_match)
         version = version_match.group(1) if version_match else ""
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+        changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+        action = (ROOT / "action.yml").read_text(encoding="utf-8")
         self.assertIn(f"python scripts/package_skill.py --version v{version} --output-dir dist", readme)
+        action_versions = re.findall(r"1838904818/audit-repo@v(\d+\.\d+\.\d+)", readme)
+        self.assertTrue(action_versions)
+        self.assertEqual(set(action_versions), {version})
+        self.assertRegex(changelog, rf"(?s)\A# Changelog\n\n.*?\n## \[{re.escape(version)}\] - ")
+        self.assertIn(
+            f"[{version}]: https://github.com/1838904818/audit-repo/compare/v1.9.1...v{version}",
+            changelog,
+        )
+        self.assertIn("--baseline-sha256", readme)
+        self.assertIn("--baseline-sha256", skill)
+        self.assertIn("--baseline-sha256", changelog)
+        self.assertRegex(action, r"(?m)^  baseline-sha256:\s*$")
 
     def test_actions_are_pinned_to_commit_shas(self) -> None:
         for relative in (".github/workflows/ci.yml", ".github/workflows/release.yml"):
@@ -94,6 +109,7 @@ class RepositoryContractTests(unittest.TestCase):
 
     def test_composite_action_exposes_expected_contract(self) -> None:
         action = (ROOT / "action.yml").read_text(encoding="utf-8")
+        runner = (ROOT / "scripts" / "check_repo.py").read_text(encoding="utf-8")
         self.assertIn("using: composite", action)
         self.assertIn("scripts/check_repo.py", action)
         for name in (
@@ -103,15 +119,26 @@ class RepositoryContractTests(unittest.TestCase):
             self.assertRegex(action, rf"(?m)^  {re.escape(name)}:\s*$")
         self.assertRegex(action, r'(?ms)^  scope-id:\s*\n.*?^    default: ""\s*$')
         self.assertRegex(action, r'(?ms)^  output-dir:\s*\n.*?^    default: ""\s*$')
+        self.assertRegex(action, r'(?ms)^  baseline-sha256:\s*\n.*?^    default: ""\s*$')
         self.assertIn('if [[ -n "$AUDIT_SCOPE_ID" ]]', action)
-        self.assertIn('tempfile.mkdtemp(prefix="audit-repo-", dir=os.environ["RUNNER_TEMP"])', action)
-        self.assertIn('AUDIT_OUTPUT_DIR="$(python -I -c', action)
+        self.assertIn('args+=(--temporary-output-parent "$RUNNER_TEMP")', action)
+        self.assertNotIn("tempfile.mkdtemp", action)
+        self.assertNotIn('AUDIT_OUTPUT_DIR="$(python', action)
         self.assertIn('python -I "$GITHUB_ACTION_PATH/scripts/check_repo.py"', action)
         self.assertIn('validate_boolean "fail-on-attention" "$AUDIT_FAIL_ON_ATTENTION"', action)
         self.assertIn('validate_boolean "require-comparable" "$AUDIT_REQUIRE_COMPARABLE"', action)
         self.assertIn("true|false) return 0", action)
         self.assertIn("A comparison gate requires a non-empty baseline", action)
+        self.assertIn("baseline-sha256 requires a non-empty baseline", action)
+        self.assertIn("baseline-sha256 must be exactly 64 hexadecimal characters", action)
+        self.assertIn('args+=(--baseline-sha256 "$AUDIT_BASELINE_SHA256")', action)
         self.assertNotRegex(action, r'(?m)^\s*args=\([^\n]*--scope-id')
+        self.assertIn('baseline_bytes = path.read_bytes()', runner)
+        self.assertIn('hashlib.sha256(baseline_bytes).hexdigest()', runner)
+        self.assertIn('comparer.load_snapshot_bytes(baseline_bytes, path)', runner)
+        self.assertIn('result = comparer.compare(baseline_data, snapshot_data)', runner)
+        self.assertNotIn('COMPARER =', runner)
+        self.assertLess(runner.index("baseline_data = load_baseline"), runner.index("tempfile.mkdtemp"))
 
     def test_python_isolated_mode_ignores_checkout_module_shadowing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -207,14 +234,30 @@ class RepositoryContractTests(unittest.TestCase):
         ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         self.assertIn("action-policy-e2e:", ci)
         self.assertIn("audit repo action fixture", ci)
-        self.assertEqual(ci.count("continue-on-error: true"), 5)
-        self.assertEqual(ci.count("python -I - <<'PY'"), 11)
+        self.assertEqual(ci.count("continue-on-error: true"), 9)
+        isolated_heredocs = ci.count("python -I - <<'PY'")
+        self.assertGreater(isolated_heredocs, 0)
+        self.assertEqual(isolated_heredocs, ci.count("<<'PY'"))
         self.assertNotIn("python - <<'PY'", ci)
         for step_id in (
             "attention_gate", "comparable_gate", "missing_baseline_gate",
             "invalid_boolean", "managed_output_collision",
         ):
             self.assertIn(f"STEP_OUTCOME: ${{{{ steps.{step_id}.outcome }}}}", ci)
+        for environment_name, step_id in (
+            ("MISSING_OUTCOME", "digest_without_baseline"),
+            ("MALFORMED_OUTCOME", "malformed_digest"),
+            ("MISMATCH_OUTCOME", "digest_mismatch"),
+            ("DEFAULT_MISMATCH_OUTCOME", "digest_mismatch_default"),
+        ):
+            self.assertIn(f"{environment_name}: ${{{{ steps.{step_id}.outcome }}}}", ci)
+            outputs_name = environment_name.replace("_OUTCOME", "_OUTPUTS")
+            self.assertIn(f"{outputs_name}: ${{{{ toJSON(steps.{step_id}.outputs) }}}}", ci)
+        self.assertEqual(
+            ci.count("baseline-sha256: ${{ steps.baseline_digest.outputs.sha256 }}"), 4,
+        )
+        self.assertEqual(ci.count('baseline-sha256: "' + "0" * 64 + '"'), 2)
+        self.assertIn('default_parent.joinpath("digest-before.json")', ci)
         self.assertIn('fail-on-attention: "TRUE"', ci)
         self.assertIn('result["level"] == "warning"', ci)
         self.assertIn('result["level"] == "note"', ci)

@@ -117,6 +117,23 @@ jobs:
           scan-mode: filesystem
           scope-id: ${{ github.repository }}:action-policy-e2e
 
+      - name: Compute fixture baseline SHA-256 for E2E
+        id: baseline_digest
+        shell: bash
+        env:
+          BASELINE_PATH: ${{ runner.temp }}/audit repo baseline output/snapshot.json
+        run: |
+          python -I - <<'PY'
+          import hashlib
+          import os
+          from pathlib import Path
+
+          digest = hashlib.sha256(Path(os.environ["BASELINE_PATH"]).read_bytes()).hexdigest()
+          assert digest != "0" * 64
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8", newline="\n") as stream:
+              stream.write(f"sha256={digest}\n")
+          PY
+
       - name: Exercise both policy gates on a comparable baseline
         id: policy_success
         uses: ./
@@ -124,6 +141,7 @@ jobs:
           path: ${{ runner.temp }}/audit repo action fixture
           output-dir: ${{ runner.temp }}/audit repo success output
           baseline: ${{ runner.temp }}/audit repo baseline output/snapshot.json
+          baseline-sha256: ${{ steps.baseline_digest.outputs.sha256 }}
           scan-mode: filesystem
           scope-id: ${{ github.repository }}:action-policy-e2e
           fail-on-attention: "true"
@@ -204,6 +222,7 @@ jobs:
           path: ${{ runner.temp }}/audit repo action fixture
           output-dir: ${{ runner.temp }}/audit repo attention output
           baseline: ${{ runner.temp }}/audit repo baseline output/snapshot.json
+          baseline-sha256: ${{ steps.baseline_digest.outputs.sha256 }}
           scan-mode: filesystem
           scope-id: ${{ github.repository }}:action-policy-e2e
           fail-on-attention: "true"
@@ -247,6 +266,7 @@ jobs:
           path: ${{ runner.temp }}/audit repo action fixture
           output-dir: ${{ runner.temp }}/audit repo incomparable output
           baseline: ${{ runner.temp }}/audit repo baseline output/snapshot.json
+          baseline-sha256: ${{ steps.baseline_digest.outputs.sha256 }}
           scan-mode: filesystem
           scope-id: ${{ github.repository }}:different-action-policy-scope
           require-comparable: "true"
@@ -323,6 +343,135 @@ jobs:
           assert output_dir.joinpath("sentinel.txt").read_text(encoding="utf-8") == "preserve sentinel\n"
           for name in ("snapshot.json", "report.md", "comparison.json", "comparison.sarif"):
               assert output_dir.joinpath(name).read_text(encoding="utf-8") == f"preserve stale {name}\n"
+          PY
+
+      - name: Seed baseline digest rejection outputs
+        shell: bash
+        env:
+          MISSING_DIR: ${{ runner.temp }}/audit repo digest missing baseline output
+          MALFORMED_DIR: ${{ runner.temp }}/audit repo malformed digest output
+          MISMATCH_DIR: ${{ runner.temp }}/audit repo digest mismatch output
+          DEFAULT_PARENT: ${{ runner.temp }}
+        run: |
+          python -I - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          for environment_name, label in (
+              ("MISSING_DIR", "missing"),
+              ("MALFORMED_DIR", "malformed"),
+              ("MISMATCH_DIR", "mismatch"),
+          ):
+              output_dir = Path(os.environ[environment_name])
+              output_dir.mkdir()
+              output_dir.joinpath("sentinel.txt").write_text(f"preserve {label} sentinel\n", encoding="utf-8")
+              for name in ("snapshot.json", "report.md", "comparison.json", "comparison.sarif"):
+                  output_dir.joinpath(name).write_text(f"preserve {label} {name}\n", encoding="utf-8")
+          default_parent = Path(os.environ["DEFAULT_PARENT"])
+          default_parent.joinpath("digest-before.json").write_text(
+              json.dumps(sorted(path.name for path in default_parent.glob("audit-repo-*"))),
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Expected failure - baseline digest requires a baseline
+        id: digest_without_baseline
+        continue-on-error: true
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/audit repo action fixture
+          output-dir: ${{ runner.temp }}/audit repo digest missing baseline output
+          baseline-sha256: ${{ steps.baseline_digest.outputs.sha256 }}
+          scan-mode: filesystem
+          scope-id: ${{ github.repository }}:action-policy-e2e
+
+      - name: Expected failure - baseline digest format is strict
+        id: malformed_digest
+        continue-on-error: true
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/audit repo action fixture
+          output-dir: ${{ runner.temp }}/audit repo malformed digest output
+          baseline: ${{ runner.temp }}/audit repo baseline output/snapshot.json
+          baseline-sha256: sha256:${{ steps.baseline_digest.outputs.sha256 }}
+          scan-mode: filesystem
+          scope-id: ${{ github.repository }}:action-policy-e2e
+
+      - name: Expected failure - baseline digest must match exact bytes
+        id: digest_mismatch
+        continue-on-error: true
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/audit repo action fixture
+          output-dir: ${{ runner.temp }}/audit repo digest mismatch output
+          baseline: ${{ runner.temp }}/audit repo baseline output/snapshot.json
+          baseline-sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+          scan-mode: filesystem
+          scope-id: ${{ github.repository }}:action-policy-e2e
+
+      - name: Expected failure - wrong digest allocates no default output
+        id: digest_mismatch_default
+        continue-on-error: true
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/audit repo action fixture
+          baseline: ${{ runner.temp }}/audit repo baseline output/snapshot.json
+          baseline-sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+          scan-mode: filesystem
+          scope-id: ${{ github.repository }}:action-policy-e2e
+
+      - name: Verify baseline digest rejections preserve every output
+        shell: bash
+        env:
+          MISSING_OUTCOME: ${{ steps.digest_without_baseline.outcome }}
+          MALFORMED_OUTCOME: ${{ steps.malformed_digest.outcome }}
+          MISMATCH_OUTCOME: ${{ steps.digest_mismatch.outcome }}
+          DEFAULT_MISMATCH_OUTCOME: ${{ steps.digest_mismatch_default.outcome }}
+          MISSING_OUTPUTS: ${{ toJSON(steps.digest_without_baseline.outputs) }}
+          MALFORMED_OUTPUTS: ${{ toJSON(steps.malformed_digest.outputs) }}
+          MISMATCH_OUTPUTS: ${{ toJSON(steps.digest_mismatch.outputs) }}
+          DEFAULT_MISMATCH_OUTPUTS: ${{ toJSON(steps.digest_mismatch_default.outputs) }}
+          MISSING_DIR: ${{ runner.temp }}/audit repo digest missing baseline output
+          MALFORMED_DIR: ${{ runner.temp }}/audit repo malformed digest output
+          MISMATCH_DIR: ${{ runner.temp }}/audit repo digest mismatch output
+          DEFAULT_PARENT: ${{ runner.temp }}
+        run: |
+          python -I - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          for outcome_name in (
+              "MISSING_OUTCOME", "MALFORMED_OUTCOME", "MISMATCH_OUTCOME", "DEFAULT_MISMATCH_OUTCOME",
+          ):
+              assert os.environ[outcome_name] == "failure", (outcome_name, os.environ[outcome_name])
+          public_outputs = {
+              "snapshot", "report", "comparison", "sarif", "attention-count", "comparable",
+              "tool-version", "scan-semantics-version",
+          }
+          for outputs_name in (
+              "MISSING_OUTPUTS", "MALFORMED_OUTPUTS", "MISMATCH_OUTPUTS", "DEFAULT_MISMATCH_OUTPUTS",
+          ):
+              outputs = json.loads(os.environ[outputs_name])
+              assert isinstance(outputs, dict), (outputs_name, outputs)
+              assert set(outputs).issubset(public_outputs), (outputs_name, outputs)
+              assert all(value in ("", None) for value in outputs.values()), (outputs_name, outputs)
+          for environment_name, label in (
+              ("MISSING_DIR", "missing"),
+              ("MALFORMED_DIR", "malformed"),
+              ("MISMATCH_DIR", "mismatch"),
+          ):
+              output_dir = Path(os.environ[environment_name])
+              assert output_dir.joinpath("sentinel.txt").read_text(encoding="utf-8") == f"preserve {label} sentinel\n"
+              for name in ("snapshot.json", "report.md", "comparison.json", "comparison.sarif"):
+                  assert output_dir.joinpath(name).read_text(encoding="utf-8") == f"preserve {label} {name}\n"
+          default_parent = Path(os.environ["DEFAULT_PARENT"])
+          before = json.loads(
+              default_parent.joinpath("digest-before.json").read_text(encoding="utf-8")
+          )
+          after = sorted(path.name for path in default_parent.glob("audit-repo-*"))
+          assert after == before, (before, after)
           PY
 
       - name: Seed invalid-boolean sentinel

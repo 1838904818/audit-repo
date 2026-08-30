@@ -10,6 +10,9 @@ inputs:
   baseline:
     description: Optional path to an earlier audit-repo JSON snapshot; required by either policy gate.
     default: ""
+  baseline-sha256:
+    description: Optional expected 64-hex SHA-256 of the baseline's exact bytes; requires baseline and an independently trusted digest source.
+    default: ""
   scan-mode:
     description: filesystem, git-visible, or tracked.
     default: tracked
@@ -71,6 +74,7 @@ runs:
         AUDIT_PATH: ${{ inputs.path }}
         AUDIT_OUTPUT_DIR: ${{ inputs.output-dir }}
         AUDIT_BASELINE: ${{ inputs.baseline }}
+        AUDIT_BASELINE_SHA256: ${{ inputs.baseline-sha256 }}
         AUDIT_SCAN_MODE: ${{ inputs.scan-mode }}
         AUDIT_SCOPE_ID: ${{ inputs.scope-id }}
         AUDIT_INCLUDE_PATHS: ${{ inputs.include-paths }}
@@ -99,12 +103,23 @@ runs:
           echo "::error title=Missing baseline::A comparison gate requires a non-empty baseline"
           exit 2
         fi
-        if [[ -z "$AUDIT_OUTPUT_DIR" ]]; then
-          AUDIT_OUTPUT_DIR="$(python -I -c 'import os, tempfile; print(tempfile.mkdtemp(prefix="audit-repo-", dir=os.environ["RUNNER_TEMP"]))')"
+        if [[ -n "$AUDIT_BASELINE_SHA256" && -z "$AUDIT_BASELINE" ]]; then
+          echo "::error title=Missing baseline::baseline-sha256 requires a non-empty baseline"
+          exit 2
         fi
-        args=("$AUDIT_PATH" --output-dir "$AUDIT_OUTPUT_DIR" --scan-mode "$AUDIT_SCAN_MODE" --max-files "$AUDIT_MAX_FILES" --large-file-mib "$AUDIT_LARGE_FILE_MIB" --github-output "$GITHUB_OUTPUT")
+        if [[ -n "$AUDIT_BASELINE_SHA256" && ! "$AUDIT_BASELINE_SHA256" =~ ^[0-9A-Fa-f]{64}$ ]]; then
+          echo "::error title=Invalid input::baseline-sha256 must be exactly 64 hexadecimal characters"
+          exit 2
+        fi
+        args=("$AUDIT_PATH" --scan-mode "$AUDIT_SCAN_MODE" --max-files "$AUDIT_MAX_FILES" --large-file-mib "$AUDIT_LARGE_FILE_MIB" --github-output "$GITHUB_OUTPUT")
+        if [[ -n "$AUDIT_OUTPUT_DIR" ]]; then
+          args+=(--output-dir "$AUDIT_OUTPUT_DIR")
+        else
+          args+=(--temporary-output-parent "$RUNNER_TEMP")
+        fi
         if [[ -n "$AUDIT_SCOPE_ID" ]]; then args+=(--scope-id "$AUDIT_SCOPE_ID"); fi
         if [[ -n "$AUDIT_BASELINE" ]]; then args+=(--baseline "$AUDIT_BASELINE"); fi
+        if [[ -n "$AUDIT_BASELINE_SHA256" ]]; then args+=(--baseline-sha256 "$AUDIT_BASELINE_SHA256"); fi
         if [[ "$AUDIT_FAIL_ON_ATTENTION" == "true" ]]; then args+=(--fail-on-attention); fi
         if [[ "$AUDIT_REQUIRE_COMPARABLE" == "true" ]]; then args+=(--require-comparable); fi
         while IFS= read -r value; do [[ -z "$value" ]] || args+=(--include-path "$value"); done <<< "$AUDIT_INCLUDE_PATHS"

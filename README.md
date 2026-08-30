@@ -126,11 +126,14 @@ Run the complete workflow with one command. It always writes `snapshot.json` and
 python scripts/check_repo.py /path/to/repo --output-dir audit-results
 python scripts/check_repo.py /path/to/repo \
   --baseline previous-snapshot.json \
+  --baseline-sha256 "$EXPECTED_BASELINE_SHA256" \
   --output-dir audit-results \
   --fail-on-attention --require-comparable
 ```
 
-Before each run, the runner removes only those four managed output paths so reused directories cannot expose stale reports. It preflights all four paths, preserves every other entry, and fails with exit code `2` without deleting any sibling artifact when a managed path is a directory. Enabling either comparison gate without `--baseline` is also an invalid configuration and fails before the output directory or managed artifacts are changed.
+`--baseline-sha256` accepts exactly 64 hexadecimal characters (uppercase or lowercase) and checks the baseline's raw bytes before parsing it. Prefixes, whitespace, and checksum-file lines are rejected. JSON formatting, a byte-order mark, trailing newlines, and LF/CRLF conversion all change the digest. Obtain the expected digest independently from maintainer-controlled configuration or a separately verified artifact; do not calculate it from the same untrusted baseline immediately before this check.
+
+Before each run, the runner removes only those four managed output paths so reused directories cannot expose stale reports. It preflights all four paths, preserves every other entry, and fails with exit code `2` without deleting any sibling artifact when a managed path is a directory. Enabling either comparison gate without `--baseline` is also invalid. A malformed digest, digest without a baseline, digest mismatch, unreadable baseline, or invalid baseline fails before the output directory is created or any managed artifact or GitHub Action output is changed. When supplied, the baseline is read once, checked, parsed as strict UTF-8 JSON, and kept in memory for the comparison. Omitting the optional digest preserves the prior baseline-comparison behavior.
 
 The runner also refuses an output directory that traverses a symbolic link or Windows reparse point (including an NTFS junction) anywhere inside the scanned repository or its containing Git worktree. This includes monorepo siblings when only a subdirectory is scanned, preventing an untrusted checkout from redirecting managed writes outside its tree. In Action mode, the GitHub output file must not equal or alias the baseline or any managed artifact.
 
@@ -166,7 +169,7 @@ Run `python scripts/collect_repo_signals.py --help` or `python scripts/compare_r
 Use the repository directly as a composite Action. Pin a release tag or commit SHA in production workflows:
 
 ```yaml
-- uses: 1838904818/audit-repo@v1.9.1
+- uses: 1838904818/audit-repo@v1.10.0
   id: audit
   with:
     scan-mode: tracked
@@ -179,9 +182,20 @@ The Action requires Python 3.10 or newer on the runner and does not install proj
 For a checked-in baseline, enable both policy gates:
 
 ```yaml
-- uses: 1838904818/audit-repo@v1.9.1
+- name: Validate baseline digest configuration
+  shell: bash
+  env:
+    EXPECTED_BASELINE_SHA256: ${{ vars.AUDIT_BASELINE_SHA256 }}
+  run: |
+    [[ "$EXPECTED_BASELINE_SHA256" =~ ^[0-9A-Fa-f]{64}$ ]] || {
+      echo "::error::AUDIT_BASELINE_SHA256 must be configured as exactly 64 hex characters"
+      exit 2
+    }
+
+- uses: 1838904818/audit-repo@v1.10.0
   with:
     baseline: .github/audit-baseline.json
+    baseline-sha256: ${{ vars.AUDIT_BASELINE_SHA256 }}
     scan-mode: tracked
     scope-id: ${{ github.repository }}:whole-repository
     exclude-paths: |
@@ -190,9 +204,9 @@ For a checked-in baseline, enable both policy gates:
     require-comparable: "true"
 ```
 
-`include-paths`, `exclude-paths`, and `exclude-dirs` accept newline-separated values. Create the approved baseline with the same exclusions so the baseline file does not become part of its own comparison scope. Policy inputs accept only the exact strings `true` and `false`. Leave both gates false for a collection-only run: enabling either gate without `baseline`, or supplying another boolean spelling, is rejected as invalid configuration instead of silently disabling policy.
+`include-paths`, `exclude-paths`, and `exclude-dirs` accept newline-separated values. Create the approved baseline with the same exclusions so the baseline file does not become part of its own comparison scope. Configure the non-secret digest variable through maintainer-controlled repository or environment settings, and keep the explicit format check: an unset Actions variable expands to an empty value, which otherwise means no digest pin was requested. Policy inputs accept only the exact strings `true` and `false`. Leave both gates false for a collection-only run: enabling either gate without `baseline`, or supplying another boolean spelling, is rejected as invalid configuration instead of silently disabling policy.
 
-Snapshots are not authenticated. In a `pull_request` workflow, do not use a baseline loaded from the untrusted pull-request checkout as an independent security gate: a contributor could change both the repository and that baseline. Load the approved baseline from a protected base ref or trusted artifact, verify its provenance, and then compare it with the pull-request snapshot.
+Digest matching proves only that the baseline has the expected exact bytes. It does not prove authorship, freshness, review status, safety, or comparison compatibility, and it does not replace `require-comparable`. In a `pull_request` workflow, a baseline and digest both loaded from the untrusted pull-request checkout—or a digest calculated from that baseline in the same job—do not form an independent security gate. Load the baseline from a protected base ref or separately trusted artifact, obtain its expected digest through an independent maintainer-controlled channel, and verify both before comparison.
 
 ## What the audit covers
 
@@ -252,7 +266,7 @@ python -m unittest discover -s scripts -p "test_*.py"
 Build the same deterministic assets used by GitHub Releases:
 
 ```bash
-python scripts/package_skill.py --version v1.9.1 --output-dir dist
+python scripts/package_skill.py --version v1.10.0 --output-dir dist
 ```
 
 The requested package version must match `TOOL_VERSION` in `scripts/collect_repo_signals.py`.

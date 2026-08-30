@@ -2,6 +2,25 @@
 
 All notable changes to `audit-repo` are documented here. The project follows semantic versioning.
 
+## [1.10.0] - 2026-08-31
+
+### Added
+
+- Add optional `--baseline-sha256` runner verification and a matching `baseline-sha256` composite-Action input for pinning a baseline's exact bytes to an independently obtained expected digest.
+- Exercise matching, missing-baseline, strict-format, mismatch, and default-temporary-output digest paths in the three-platform Action policy matrix.
+
+### Changed
+
+- Read a comparison baseline once, verify its digest when requested, parse the same bytes as strict UTF-8 JSON, and retain the validated object in memory instead of reopening the baseline after collection.
+- Allocate the Action's unique default output directory only after baseline path, digest, and snapshot validation succeeds.
+
+### Security
+
+- Reject a digest without a baseline, malformed digest text, digest mismatch, unreadable baseline, and invalid baseline before creating or clearing outputs or appending GitHub Action outputs.
+- Document that a matching SHA-256 is an exact-byte content pin, not proof of authorship, freshness, review, safety, or comparability. A digest from the same untrusted checkout is not an independent trust signal.
+
+The digest is optional. Snapshot schema 1 and scan semantics 3 are unchanged, so v1.9.1 and v1.10.0 snapshots remain comparable when their scan settings and logical scopes match.
+
 ## [1.9.1] - 2026-08-31
 
 ### Added
@@ -203,6 +222,7 @@ Because file classification changed, snapshots created before v1.9.0 have a diff
 
 - First stable release of the Codex Skill, repository signal collector, snapshot comparer, tests, and CI.
 
+[1.10.0]: https://github.com/1838904818/audit-repo/compare/v1.9.1...v1.10.0
 [1.9.1]: https://github.com/1838904818/audit-repo/compare/v1.9.0...v1.9.1
 [1.9.0]: https://github.com/1838904818/audit-repo/compare/v1.8.2...v1.9.0
 [1.8.2]: https://github.com/1838904818/audit-repo/compare/v1.8.1...v1.8.2

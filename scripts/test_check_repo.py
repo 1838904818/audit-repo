@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -43,9 +44,12 @@ class CheckRepoTests(unittest.TestCase):
             first = self.run_check(repository_dir, "--scan-mode", "filesystem", "--scope-id", "test", "--output-dir", first_dir)
             self.assertEqual(first.returncode, 0, first.stderr)
             github_output = Path(second_dir, "github-output.txt")
+            baseline = Path(first_dir, "snapshot.json")
+            baseline_sha256 = hashlib.sha256(baseline.read_bytes()).hexdigest().upper()
             second = self.run_check(
                 repository_dir, "--scan-mode", "filesystem", "--scope-id", "test",
-                "--output-dir", second_dir, "--baseline", str(Path(first_dir, "snapshot.json")),
+                "--output-dir", second_dir, "--baseline", str(baseline),
+                "--baseline-sha256", baseline_sha256,
                 "--fail-on-attention", "--require-comparable", "--github-output", str(github_output),
             )
             self.assertEqual(second.returncode, 0, second.stderr)
@@ -56,9 +60,9 @@ class CheckRepoTests(unittest.TestCase):
             self.assertIn("attention-count=0\n", outputs)
             self.assertIn("comparable=true\n", outputs)
             self.assertIn("sarif=", outputs)
-            self.assertIn("tool-version=1.9.1\n", outputs)
+            self.assertIn("tool-version=1.10.0\n", outputs)
             self.assertIn("scan-semantics-version=3\n", outputs)
-            self.assertIn("tool_version=1.9.1\n", second.stdout)
+            self.assertIn("tool_version=1.10.0\n", second.stdout)
 
     def test_comparison_gates_require_baseline_before_output_cleanup(self) -> None:
         gate_combinations = (
@@ -85,6 +89,217 @@ class CheckRepoTests(unittest.TestCase):
                 self.assertIn("requires --baseline", result.stderr)
                 for name, content in sentinels.items():
                     self.assertEqual(Path(output_dir, name).read_text(encoding="utf-8"), content)
+
+    def test_baseline_digest_requires_baseline_before_output_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as repository_dir, tempfile.TemporaryDirectory() as output_dir, \
+                tempfile.TemporaryDirectory() as github_dir:
+            Path(repository_dir, "README.md").write_text("# Example\n", encoding="utf-8")
+            sentinels = {
+                name: f"preserve {name}\n"
+                for name in ("snapshot.json", "report.md", "comparison.json", "comparison.sarif")
+            }
+            for name, content in sentinels.items():
+                Path(output_dir, name).write_text(content, encoding="utf-8")
+            github_output = Path(github_dir, "github-output.txt")
+            github_output.write_text("preserve github output\n", encoding="utf-8")
+
+            result = self.run_check(
+                repository_dir, "--scan-mode", "filesystem", "--output-dir", output_dir,
+                "--baseline-sha256", "0" * 64, "--github-output", str(github_output),
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("--baseline-sha256 requires --baseline", result.stderr)
+            for name, content in sentinels.items():
+                self.assertEqual(Path(output_dir, name).read_text(encoding="utf-8"), content)
+            self.assertEqual(github_output.read_text(encoding="utf-8"), "preserve github output\n")
+
+    def test_rejects_malformed_baseline_digest_before_output_cleanup(self) -> None:
+        invalid_values = (
+            "", "0" * 63, "0" * 65, "g" * 64, f" {'0' * 64}",
+            f"{'0' * 64} ", f"{'0' * 64}\n", f"sha256:{'0' * 64}",
+        )
+        for invalid in invalid_values:
+            with self.subTest(invalid=repr(invalid)), tempfile.TemporaryDirectory() as repository_dir, \
+                    tempfile.TemporaryDirectory() as baseline_dir, tempfile.TemporaryDirectory() as output_dir, \
+                    tempfile.TemporaryDirectory() as github_dir:
+                Path(repository_dir, "README.md").write_text("# Example\n", encoding="utf-8")
+                created = self.run_check(
+                    repository_dir, "--scan-mode", "filesystem", "--output-dir", baseline_dir,
+                )
+                self.assertEqual(created.returncode, 0, created.stderr)
+                sentinel = Path(output_dir, "snapshot.json")
+                sentinel.write_text("preserve snapshot\n", encoding="utf-8")
+                github_output = Path(github_dir, "github-output.txt")
+                github_output.write_text("preserve github output\n", encoding="utf-8")
+
+                result = self.run_check(
+                    repository_dir, "--scan-mode", "filesystem", "--output-dir", output_dir,
+                    "--baseline", str(Path(baseline_dir, "snapshot.json")),
+                    "--baseline-sha256", invalid, "--github-output", str(github_output),
+                )
+
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("must be exactly 64 hexadecimal characters", result.stderr)
+                self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve snapshot\n")
+                self.assertEqual(github_output.read_text(encoding="utf-8"), "preserve github output\n")
+
+    def test_rejects_wrong_baseline_digest_before_any_managed_output_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as repository_dir, tempfile.TemporaryDirectory() as baseline_dir, \
+                tempfile.TemporaryDirectory() as output_dir, tempfile.TemporaryDirectory() as github_dir:
+            Path(repository_dir, "README.md").write_text("# Example\n", encoding="utf-8")
+            created = self.run_check(
+                repository_dir, "--scan-mode", "filesystem", "--scope-id", "test", "--output-dir", baseline_dir,
+            )
+            self.assertEqual(created.returncode, 0, created.stderr)
+            baseline = Path(baseline_dir, "snapshot.json")
+            actual = hashlib.sha256(baseline.read_bytes()).hexdigest()
+            wrong = ("1" if actual[0] == "0" else "0") + actual[1:]
+            sentinels = {
+                name: f"preserve {name}\n"
+                for name in ("snapshot.json", "report.md", "comparison.json", "comparison.sarif")
+            }
+            for name, content in sentinels.items():
+                Path(output_dir, name).write_text(content, encoding="utf-8")
+            github_output = Path(github_dir, "github-output.txt")
+            github_output.write_text("preserve github output\n", encoding="utf-8")
+
+            result = self.run_check(
+                repository_dir, "--scan-mode", "filesystem", "--scope-id", "test",
+                "--output-dir", output_dir, "--baseline", str(baseline),
+                "--baseline-sha256", wrong, "--github-output", str(github_output),
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("baseline SHA-256 mismatch", result.stderr)
+            for name, content in sentinels.items():
+                self.assertEqual(Path(output_dir, name).read_text(encoding="utf-8"), content)
+            self.assertEqual(github_output.read_text(encoding="utf-8"), "preserve github output\n")
+
+    def test_loaded_baseline_is_frozen_after_digest_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as repository_dir, tempfile.TemporaryDirectory() as baseline_dir:
+            Path(repository_dir, "README.md").write_text("# Example\n", encoding="utf-8")
+            created = self.run_check(
+                repository_dir, "--scan-mode", "filesystem", "--output-dir", baseline_dir,
+            )
+            self.assertEqual(created.returncode, 0, created.stderr)
+            baseline = Path(baseline_dir, "snapshot.json")
+            digest = hashlib.sha256(baseline.read_bytes()).hexdigest()
+            loaded = MODULE.load_baseline(baseline, digest.upper())
+            original_root = loaded["root"]
+            replacement = json.loads(baseline.read_text(encoding="utf-8"))
+            replacement["root"] = "/changed-after-verification"
+            baseline.write_text(json.dumps(replacement), encoding="utf-8")
+
+            self.assertEqual(loaded["root"], original_root)
+            with self.assertRaisesRegex(MODULE.BaselineError, "baseline SHA-256 mismatch"):
+                MODULE.load_baseline(baseline, digest)
+
+    def test_baseline_preflight_failures_create_no_output_and_preserve_github_output(self) -> None:
+        cases = {
+            "missing": None,
+            "non-utf8": b"\xff",
+            "invalid-json": b"{",
+            "invalid-schema": b'{"schema_version":999}',
+        }
+        for label, content in cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as repository_dir, \
+                    tempfile.TemporaryDirectory() as baseline_dir, tempfile.TemporaryDirectory() as parent_dir:
+                Path(repository_dir, "README.md").write_text("# Example\n", encoding="utf-8")
+                baseline = Path(baseline_dir, f"{label}.json")
+                arguments = ["--baseline", str(baseline)]
+                if content is not None:
+                    baseline.write_bytes(content)
+                    arguments.extend(("--baseline-sha256", hashlib.sha256(content).hexdigest()))
+                output_dir = Path(parent_dir, "not-created")
+                github_output = Path(parent_dir, "github-output.txt")
+                original_github_output = b"preserve github output\n"
+                github_output.write_bytes(original_github_output)
+
+                result = self.run_check(
+                    repository_dir, "--scan-mode", "filesystem", "--output-dir", str(output_dir),
+                    *arguments, "--github-output", str(github_output),
+                )
+
+                self.assertEqual(result.returncode, 2)
+                self.assertFalse(output_dir.exists())
+                self.assertEqual(github_output.read_bytes(), original_github_output)
+
+    def test_baseline_digest_covers_trailing_newline_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as repository_dir, tempfile.TemporaryDirectory() as baseline_dir, \
+                tempfile.TemporaryDirectory() as parent_dir:
+            Path(repository_dir, "README.md").write_text("# Example\n", encoding="utf-8")
+            created = self.run_check(
+                repository_dir, "--scan-mode", "filesystem", "--output-dir", baseline_dir,
+            )
+            self.assertEqual(created.returncode, 0, created.stderr)
+            baseline = Path(baseline_dir, "snapshot.json")
+            digest_before = hashlib.sha256(baseline.read_bytes()).hexdigest()
+            baseline.write_bytes(baseline.read_bytes() + b"\n")
+            output_dir = Path(parent_dir, "not-created")
+
+            result = self.run_check(
+                repository_dir, "--scan-mode", "filesystem", "--output-dir", str(output_dir),
+                "--baseline", str(baseline), "--baseline-sha256", digest_before,
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("baseline SHA-256 mismatch", result.stderr)
+            self.assertFalse(output_dir.exists())
+
+    def test_wrong_digest_allocates_no_temporary_output_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as repository_dir, tempfile.TemporaryDirectory() as baseline_dir, \
+                tempfile.TemporaryDirectory() as temporary_parent:
+            Path(repository_dir, "README.md").write_text("# Example\n", encoding="utf-8")
+            created = self.run_check(
+                repository_dir, "--scan-mode", "filesystem", "--output-dir", baseline_dir,
+            )
+            self.assertEqual(created.returncode, 0, created.stderr)
+            baseline = Path(baseline_dir, "snapshot.json")
+            before = sorted(Path(temporary_parent).iterdir())
+
+            result = self.run_check(
+                repository_dir, "--scan-mode", "filesystem",
+                "--temporary-output-parent", temporary_parent,
+                "--baseline", str(baseline), "--baseline-sha256", "0" * 64,
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("baseline SHA-256 mismatch", result.stderr)
+            self.assertEqual(sorted(Path(temporary_parent).iterdir()), before)
+
+    def test_temporary_output_parent_allocates_unique_output_after_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as repository_dir, tempfile.TemporaryDirectory() as temporary_parent:
+            Path(repository_dir, "README.md").write_text("# Example\n", encoding="utf-8")
+
+            result = self.run_check(
+                repository_dir, "--scan-mode", "filesystem",
+                "--temporary-output-parent", temporary_parent,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            children = list(Path(temporary_parent).iterdir())
+            self.assertEqual(len(children), 1)
+            output_dir = children[0]
+            self.assertTrue(output_dir.name.startswith("audit-repo-"))
+            self.assertTrue(output_dir.joinpath("snapshot.json").is_file())
+            self.assertTrue(output_dir.joinpath("report.md").is_file())
+            self.assertIn(f"snapshot={output_dir / 'snapshot.json'}", result.stdout)
+
+    def test_rejects_temporary_output_parent_inside_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as repository_dir:
+            repository = Path(repository_dir)
+            repository.joinpath("README.md").write_text("# Example\n", encoding="utf-8")
+            temporary_parent = repository / "untrusted-temp"
+
+            result = self.run_check(
+                repository_dir, "--scan-mode", "filesystem",
+                "--temporary-output-parent", str(temporary_parent),
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("temporary output parent must be outside", result.stderr)
+            self.assertFalse(temporary_parent.exists())
 
     def test_github_outputs_use_multiline_records_for_untrusted_newlines(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -272,7 +487,7 @@ class CheckRepoTests(unittest.TestCase):
             self.assertFalse(Path(output_dir, "comparison.sarif").exists())
             self.assertEqual(keep.read_text(encoding="utf-8"), "preserve me\n")
 
-    def test_failed_comparison_does_not_leave_prior_reports(self) -> None:
+    def test_invalid_baseline_preserves_prior_outputs_before_collection(self) -> None:
         with tempfile.TemporaryDirectory() as repository_dir, tempfile.TemporaryDirectory() as baseline_dir, \
                 tempfile.TemporaryDirectory() as output_dir:
             repository = Path(repository_dir)
@@ -289,6 +504,10 @@ class CheckRepoTests(unittest.TestCase):
             self.assertEqual(compared.returncode, 0, compared.stderr)
             invalid = Path(baseline_dir, "invalid.json")
             invalid.write_text("{", encoding="utf-8")
+            preserved = {
+                name: Path(output_dir, name).read_bytes()
+                for name in ("snapshot.json", "report.md", "comparison.json", "comparison.sarif")
+            }
 
             failed = self.run_check(
                 repository_dir, "--scan-mode", "filesystem", "--scope-id", "test",
@@ -296,9 +515,9 @@ class CheckRepoTests(unittest.TestCase):
             )
 
             self.assertEqual(failed.returncode, 2)
-            self.assertTrue(Path(output_dir, "snapshot.json").is_file())
-            for stale_name in ("report.md", "comparison.json", "comparison.sarif"):
-                self.assertFalse(Path(output_dir, stale_name).exists())
+            self.assertIn("invalid JSON", failed.stderr)
+            for name, content in preserved.items():
+                self.assertEqual(Path(output_dir, name).read_bytes(), content)
 
     def test_managed_output_directory_collision_fails_without_recursive_removal(self) -> None:
         with tempfile.TemporaryDirectory() as repository_dir, tempfile.TemporaryDirectory() as output_dir:
