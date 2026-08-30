@@ -73,6 +73,14 @@ class RepositoryContractTests(unittest.TestCase):
         for mojibake_marker in ("涓枃", "锛", "€"):
             self.assertNotIn(mojibake_marker, readme)
 
+    def test_readme_package_example_matches_runtime_version(self) -> None:
+        collector = (ROOT / "scripts" / "collect_repo_signals.py").read_text(encoding="utf-8")
+        version_match = re.search(r'(?m)^TOOL_VERSION = "([^"]+)"\s*$', collector)
+        self.assertIsNotNone(version_match)
+        version = version_match.group(1) if version_match else ""
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn(f"python scripts/package_skill.py --version v{version} --output-dir dist", readme)
+
     def test_actions_are_pinned_to_commit_shas(self) -> None:
         for relative in (".github/workflows/ci.yml", ".github/workflows/release.yml"):
             workflow = (ROOT / relative).read_text(encoding="utf-8")

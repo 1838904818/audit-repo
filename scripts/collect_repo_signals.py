@@ -92,7 +92,7 @@ TOOL_CONFIG_NAMES = {
 }
 LARGE_FILE_BYTES = 5 * 1024 * 1024
 SCHEMA_VERSION = 1
-TOOL_VERSION = "1.8.0"
+TOOL_VERSION = "1.8.1"
 SCAN_SEMANTICS_VERSION = 1
 SCAN_MODES = {"filesystem", "git-visible", "tracked"}
 WORK_MARKER_RE = re.compile(r"(?im)(?:#|//|/\*+|<!--|;|--)\s*(TODO|FIXME|HACK|XXX)\b")

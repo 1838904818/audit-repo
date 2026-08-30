@@ -23,8 +23,9 @@ ORIGINAL_ROOT = MODULE.ROOT
 class PackageSkillTests(unittest.TestCase):
     def test_builds_deterministic_minimal_archive_and_checksum(self) -> None:
         with tempfile.TemporaryDirectory() as first_dir, tempfile.TemporaryDirectory() as second_dir:
-            first_archive, first_checksum, first_digest = MODULE.build_archive("v1.2.3", Path(first_dir))
-            second_archive, _, second_digest = MODULE.build_archive("1.2.3", Path(second_dir))
+            version = MODULE.runtime_tool_version()
+            first_archive, first_checksum, first_digest = MODULE.build_archive(f"v{version}", Path(first_dir))
+            second_archive, _, second_digest = MODULE.build_archive(version, Path(second_dir))
 
             self.assertEqual(first_digest, second_digest)
             self.assertEqual(first_archive.read_bytes(), second_archive.read_bytes())
@@ -73,9 +74,10 @@ class PackageSkillTests(unittest.TestCase):
 
             try:
                 MODULE.ROOT = lf_root
-                lf_archive, _, lf_digest = MODULE.build_archive("v1.2.0", Path(output_dir) / "lf")
+                version = MODULE.runtime_tool_version()
+                lf_archive, _, lf_digest = MODULE.build_archive(f"v{version}", Path(output_dir) / "lf")
                 MODULE.ROOT = crlf_root
-                crlf_archive, _, crlf_digest = MODULE.build_archive("v1.2.0", Path(output_dir) / "crlf")
+                crlf_archive, _, crlf_digest = MODULE.build_archive(f"v{version}", Path(output_dir) / "crlf")
             finally:
                 MODULE.ROOT = ORIGINAL_ROOT
 
@@ -85,6 +87,11 @@ class PackageSkillTests(unittest.TestCase):
     def test_rejects_invalid_version(self) -> None:
         with self.assertRaises(MODULE.PackageError):
             MODULE.normalize_version("latest")
+
+    def test_rejects_release_version_that_differs_from_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as output_dir:
+            with self.assertRaisesRegex(MODULE.PackageError, "does not match runtime TOOL_VERSION"):
+                MODULE.build_archive("v9.9.9", Path(output_dir))
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ import json
 import os
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 
@@ -55,7 +56,14 @@ def write_github_outputs(path: Path, values: dict[str, str]) -> bool:
     try:
         with path.open("a", encoding="utf-8", newline="\n") as stream:
             for key, value in values.items():
-                stream.write(f"{key}={value}\n")
+                if "\n" not in value and "\r" not in value:
+                    stream.write(f"{key}={value}\n")
+                    continue
+                value_lines = set(value.splitlines())
+                delimiter = f"audit_repo_{uuid.uuid4().hex}"
+                while delimiter in value_lines:
+                    delimiter = f"audit_repo_{uuid.uuid4().hex}"
+                stream.write(f"{key}<<{delimiter}\n{value}\n{delimiter}\n")
     except (OSError, UnicodeError) as error:
         print(f"error: could not write GitHub Action outputs: {error}", file=sys.stderr)
         return False
@@ -71,20 +79,46 @@ def write_text(path: Path, content: str, label: str) -> bool:
     return True
 
 
+def paths_alias(first: Path, second: Path) -> bool:
+    if first == second:
+        return True
+    if not first.exists() or not second.exists():
+        return False
+    return os.path.samefile(first, second)
+
+
 def main() -> int:
     args = parse_args()
-    repository = Path(args.path).expanduser().resolve()
-    output_dir = args.output_dir.expanduser().resolve()
     try:
-        output_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as error:
-        print(f"error: could not create output directory: {error}", file=sys.stderr)
+        repository = Path(args.path).expanduser().resolve()
+        output_dir = args.output_dir.expanduser().resolve()
+        baseline = args.baseline.expanduser().resolve() if args.baseline else None
+    except (OSError, RuntimeError) as error:
+        print(f"error: could not resolve an input path: {error}", file=sys.stderr)
         return 2
 
     snapshot = output_dir / "snapshot.json"
     report = output_dir / "report.md"
     comparison = output_dir / "comparison.json"
     sarif = output_dir / "comparison.sarif"
+    if baseline is not None:
+        try:
+            baseline_aliases_output = any(
+                paths_alias(baseline, generated)
+                for generated in (snapshot, report, comparison, sarif)
+            )
+        except OSError as error:
+            print(f"error: could not verify baseline isolation: {error}", file=sys.stderr)
+            return 2
+        if baseline_aliases_output:
+            print("error: baseline must not alias any generated output", file=sys.stderr)
+            return 2
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        print(f"error: could not create output directory: {error}", file=sys.stderr)
+        return 2
+
     common = [
         str(repository), "--scan-mode", args.scan_mode, "--scope-id", args.scope_id,
         "--max-files", str(args.max_files), "--large-file-mib", str(args.large_file_mib),
@@ -107,8 +141,7 @@ def main() -> int:
 
     attention_count = "0"
     comparable = ""
-    if args.baseline:
-        baseline = args.baseline.expanduser().resolve()
+    if baseline is not None:
         compare_json = [
             sys.executable, str(COMPARER), str(baseline), str(snapshot),
             "--format", "json", "--output", str(comparison),
@@ -139,8 +172,8 @@ def main() -> int:
         values = {
             "snapshot": str(snapshot),
             "report": str(report),
-            "comparison": str(comparison) if args.baseline else "",
-            "sarif": str(sarif) if args.baseline else "",
+            "comparison": str(comparison) if baseline is not None else "",
+            "sarif": str(sarif) if baseline is not None else "",
             "attention-count": attention_count,
             "comparable": comparable,
             "tool-version": tool_version,
@@ -152,7 +185,7 @@ def main() -> int:
     print(f"report={report}")
     print(f"tool_version={tool_version}")
     print(f"scan_semantics_version={scan_semantics_version}")
-    if args.baseline:
+    if baseline is not None:
         print(f"comparison={comparison}")
         print(f"sarif={sarif}")
         print(f"attention_count={attention_count}")

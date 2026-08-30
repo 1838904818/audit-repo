@@ -14,6 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ARCHIVE_ROOT = "audit-repo"
 VERSION_RE = re.compile(r"^v?[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
+TOOL_VERSION_RE = re.compile(rb'(?m)^TOOL_VERSION = "([^"]+)"\s*$')
 FIXED_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 RUNTIME_FILES = (
     Path("SKILL.md"),
@@ -46,8 +47,28 @@ def archive_bytes(path: Path) -> bytes:
         raise PackageError(f"could not read required file {path}: {error}") from error
 
 
+def runtime_tool_version() -> str:
+    source = archive_bytes(ROOT / "scripts" / "collect_repo_signals.py")
+    match = TOOL_VERSION_RE.search(source)
+    if match is None:
+        raise PackageError("could not find TOOL_VERSION in scripts/collect_repo_signals.py")
+    try:
+        return match.group(1).decode("ascii")
+    except UnicodeDecodeError as error:
+        raise PackageError("TOOL_VERSION must contain ASCII semantic-version text") from error
+
+
 def build_archive(version: str, output_dir: Path) -> tuple[Path, Path, str]:
     normalized = normalize_version(version)
+    runtime_version = runtime_tool_version()
+    try:
+        normalized_runtime_version = normalize_version(runtime_version)
+    except PackageError as error:
+        raise PackageError(f"invalid runtime TOOL_VERSION {runtime_version!r}: {error}") from error
+    if normalized != normalized_runtime_version:
+        raise PackageError(
+            f"release version {normalized} does not match runtime TOOL_VERSION {runtime_version}"
+        )
     missing = [str(path) for path in RUNTIME_FILES if not (ROOT / path).is_file()]
     if missing:
         raise PackageError("missing required runtime files: " + ", ".join(missing))

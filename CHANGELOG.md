@@ -2,6 +2,15 @@
 
 All notable changes to `audit-repo` are documented here. The project follows semantic versioning.
 
+## [1.8.1] - 2026-08-31
+
+### Fixed
+
+- Encode Action output values containing CR or LF with GitHub's multiline file-command format.
+- Prevent a user-controlled output path from injecting additional `$GITHUB_OUTPUT` keys on platforms that allow newline characters in filenames.
+- Reject a baseline that aliases any generated output before collection can overwrite trusted comparison evidence.
+- Refuse release packaging when the requested tag version differs from the collector's runtime `TOOL_VERSION`.
+
 ## [1.8.0] - 2026-08-30
 
 ### Added
@@ -136,6 +145,7 @@ All notable changes to `audit-repo` are documented here. The project follows sem
 
 - First stable release of the Codex Skill, repository signal collector, snapshot comparer, tests, and CI.
 
+[1.8.1]: https://github.com/1838904818/audit-repo/compare/v1.8.0...v1.8.1
 [1.8.0]: https://github.com/1838904818/audit-repo/compare/v1.7.2...v1.8.0
 [1.7.2]: https://github.com/1838904818/audit-repo/compare/v1.7.1...v1.7.2
 [1.7.1]: https://github.com/1838904818/audit-repo/compare/v1.7.0...v1.7.1
