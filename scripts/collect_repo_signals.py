@@ -99,7 +99,7 @@ TOOL_CONFIG_NAMES = {
 }
 LARGE_FILE_BYTES = 5 * 1024 * 1024
 SCHEMA_VERSION = 1
-TOOL_VERSION = "1.10.1"
+TOOL_VERSION = "1.10.2"
 SCAN_SEMANTICS_VERSION = 3
 DISABLED_GIT_HOOKS_PATH = Path(__file__).resolve().as_posix()
 SCAN_MODES = {"filesystem", "git-visible", "tracked"}
@@ -159,6 +159,28 @@ def normalize_scope_id(scope_id: str | None) -> str | None:
     ):
         raise CollectionError("--scope-id must be 1-200 characters without control characters")
     return scope_id
+
+
+def normalize_excluded_directory_names(names: Iterable[str]) -> list[str]:
+    """Return validated, case-insensitive directory-name exclusions."""
+    normalized: set[str] = set()
+    for name in names:
+        if not isinstance(name, str):
+            raise CollectionError("--exclude-dir values must be strings")
+        if (
+            not name
+            or not name.strip()
+            or name in (".", "..")
+            or "/" in name
+            or "\\" in name
+            or any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in name)
+        ):
+            raise CollectionError(
+                "--exclude-dir values must be non-empty single directory names without "
+                "path separators, dot segments, or control characters"
+            )
+        normalized.add(name.lower())
+    return sorted(normalized)
 
 
 def validate_collection_options(
@@ -794,7 +816,7 @@ def collect(
     untrusted_roots = (root_candidate, *tuple(git_untrusted_roots))
     if max_files < 1:
         raise CollectionError("--max-files must be positive")
-    excluded = sorted({name.lower() for name in exclude_dirs})
+    excluded = normalize_excluded_directory_names(exclude_dirs)
     included_patterns = normalize_path_patterns(include_paths)
     excluded_patterns = normalize_path_patterns(exclude_paths)
     normalized_scope_id = normalize_scope_id(scope_id)
@@ -1089,6 +1111,7 @@ def main() -> int:
             exclude_paths=args.exclude_path,
             scope_id=args.scope_id,
         )
+        exclude_dirs = normalize_excluded_directory_names(args.exclude_dir)
     except CollectionError as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
@@ -1101,7 +1124,7 @@ def main() -> int:
         data = collect(
             root_candidate,
             args.max_files,
-            exclude_dirs=args.exclude_dir,
+            exclude_dirs=exclude_dirs,
             large_file_bytes=large_file_bytes,
             scan_mode=args.scan_mode,
             include_paths=include_paths,

@@ -520,6 +520,7 @@ jobs:
           LARGE_FILE_DIR: ${{ runner.temp }}/audit repo invalid large file output
           INCLUDE_DIR: ${{ runner.temp }}/audit repo invalid include output
           EXCLUDE_DIR: ${{ runner.temp }}/audit repo invalid exclude output
+          EXCLUDE_DIRS_DIR: ${{ runner.temp }}/audit repo invalid exclude dirs output
           SCOPE_DIR: ${{ runner.temp }}/audit repo invalid scope output
           NON_GIT_DIR: ${{ runner.temp }}/audit repo non git tracked output
           MISSING_ROOT: ${{ runner.temp }}/audit repo missing root
@@ -532,7 +533,7 @@ jobs:
 
           explicit_directories = (
               "MAX_FILES_DIR", "LARGE_FILE_DIR", "INCLUDE_DIR",
-              "EXCLUDE_DIR", "SCOPE_DIR", "NON_GIT_DIR",
+              "EXCLUDE_DIR", "EXCLUDE_DIRS_DIR", "SCOPE_DIR", "NON_GIT_DIR",
           )
 
           def tree_state(root):
@@ -622,6 +623,19 @@ jobs:
             ignored/**
             ../escape/**
 
+      - name: Expected failure - excluded directory names reject nested paths
+        id: invalid_exclude_dirs_explicit
+        continue-on-error: true
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/audit repo action fixture
+          output-dir: ${{ runner.temp }}/audit repo invalid exclude dirs output
+          scan-mode: filesystem
+          scope-id: ${{ github.repository }}:invalid-input-e2e
+          exclude-dirs: |
+            generated
+            nested/name
+
       - name: Expected failure - scope ID length is bounded
         id: invalid_scope_explicit
         continue-on-error: true
@@ -652,6 +666,17 @@ jobs:
           scope-id: ${{ github.repository }}:invalid-input-e2e
           max-files: "0"
 
+      - name: Expected failure - invalid excluded directory allocates no default output
+        id: invalid_exclude_dirs_default
+        continue-on-error: true
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/audit repo action fixture
+          scan-mode: filesystem
+          scope-id: ${{ github.repository }}:invalid-input-e2e
+          exclude-dirs: |
+            nested/name
+
       - name: Expected failure - missing root allocates no default output
         id: missing_root_default
         continue-on-error: true
@@ -668,22 +693,27 @@ jobs:
           LARGE_FILE_OUTCOME: ${{ steps.invalid_large_file_explicit.outcome }}
           INCLUDE_OUTCOME: ${{ steps.invalid_include_explicit.outcome }}
           EXCLUDE_OUTCOME: ${{ steps.invalid_exclude_explicit.outcome }}
+          EXCLUDE_DIRS_OUTCOME: ${{ steps.invalid_exclude_dirs_explicit.outcome }}
           SCOPE_OUTCOME: ${{ steps.invalid_scope_explicit.outcome }}
           NON_GIT_OUTCOME: ${{ steps.non_git_tracked_explicit.outcome }}
           DEFAULT_MAX_OUTCOME: ${{ steps.invalid_max_files_default.outcome }}
+          DEFAULT_EXCLUDE_DIRS_OUTCOME: ${{ steps.invalid_exclude_dirs_default.outcome }}
           MISSING_ROOT_OUTCOME: ${{ steps.missing_root_default.outcome }}
           MAX_FILES_OUTPUTS: ${{ toJSON(steps.invalid_max_files_explicit.outputs) }}
           LARGE_FILE_OUTPUTS: ${{ toJSON(steps.invalid_large_file_explicit.outputs) }}
           INCLUDE_OUTPUTS: ${{ toJSON(steps.invalid_include_explicit.outputs) }}
           EXCLUDE_OUTPUTS: ${{ toJSON(steps.invalid_exclude_explicit.outputs) }}
+          EXCLUDE_DIRS_OUTPUTS: ${{ toJSON(steps.invalid_exclude_dirs_explicit.outputs) }}
           SCOPE_OUTPUTS: ${{ toJSON(steps.invalid_scope_explicit.outputs) }}
           NON_GIT_OUTPUTS: ${{ toJSON(steps.non_git_tracked_explicit.outputs) }}
           DEFAULT_MAX_OUTPUTS: ${{ toJSON(steps.invalid_max_files_default.outputs) }}
+          DEFAULT_EXCLUDE_DIRS_OUTPUTS: ${{ toJSON(steps.invalid_exclude_dirs_default.outputs) }}
           MISSING_ROOT_OUTPUTS: ${{ toJSON(steps.missing_root_default.outputs) }}
           MAX_FILES_DIR: ${{ runner.temp }}/audit repo invalid max files output
           LARGE_FILE_DIR: ${{ runner.temp }}/audit repo invalid large file output
           INCLUDE_DIR: ${{ runner.temp }}/audit repo invalid include output
           EXCLUDE_DIR: ${{ runner.temp }}/audit repo invalid exclude output
+          EXCLUDE_DIRS_DIR: ${{ runner.temp }}/audit repo invalid exclude dirs output
           SCOPE_DIR: ${{ runner.temp }}/audit repo invalid scope output
           NON_GIT_DIR: ${{ runner.temp }}/audit repo non git tracked output
           MISSING_ROOT: ${{ runner.temp }}/audit repo missing root
@@ -696,8 +726,8 @@ jobs:
 
           outcome_names = (
               "MAX_FILES_OUTCOME", "LARGE_FILE_OUTCOME", "INCLUDE_OUTCOME",
-              "EXCLUDE_OUTCOME", "SCOPE_OUTCOME", "NON_GIT_OUTCOME",
-              "DEFAULT_MAX_OUTCOME", "MISSING_ROOT_OUTCOME",
+              "EXCLUDE_OUTCOME", "EXCLUDE_DIRS_OUTCOME", "SCOPE_OUTCOME", "NON_GIT_OUTCOME",
+              "DEFAULT_MAX_OUTCOME", "DEFAULT_EXCLUDE_DIRS_OUTCOME", "MISSING_ROOT_OUTCOME",
           )
           for outcome_name in outcome_names:
               assert os.environ[outcome_name] == "failure", (outcome_name, os.environ[outcome_name])
@@ -708,8 +738,8 @@ jobs:
           }
           output_names = (
               "MAX_FILES_OUTPUTS", "LARGE_FILE_OUTPUTS", "INCLUDE_OUTPUTS",
-              "EXCLUDE_OUTPUTS", "SCOPE_OUTPUTS", "NON_GIT_OUTPUTS",
-              "DEFAULT_MAX_OUTPUTS", "MISSING_ROOT_OUTPUTS",
+              "EXCLUDE_OUTPUTS", "EXCLUDE_DIRS_OUTPUTS", "SCOPE_OUTPUTS", "NON_GIT_OUTPUTS",
+              "DEFAULT_MAX_OUTPUTS", "DEFAULT_EXCLUDE_DIRS_OUTPUTS", "MISSING_ROOT_OUTPUTS",
           )
           for outputs_name in output_names:
               outputs = json.loads(os.environ[outputs_name])
@@ -733,7 +763,7 @@ jobs:
           )
           explicit_directories = (
               "MAX_FILES_DIR", "LARGE_FILE_DIR", "INCLUDE_DIR",
-              "EXCLUDE_DIR", "SCOPE_DIR", "NON_GIT_DIR",
+              "EXCLUDE_DIR", "EXCLUDE_DIRS_DIR", "SCOPE_DIR", "NON_GIT_DIR",
           )
           for environment_name in explicit_directories:
               output_dir = Path(os.environ[environment_name])

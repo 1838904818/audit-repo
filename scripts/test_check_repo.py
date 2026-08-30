@@ -102,9 +102,9 @@ class CheckRepoTests(unittest.TestCase):
             self.assertIn("attention-count=0\n", outputs)
             self.assertIn("comparable=true\n", outputs)
             self.assertIn("sarif=", outputs)
-            self.assertIn("tool-version=1.10.1\n", outputs)
+            self.assertIn("tool-version=1.10.2\n", outputs)
             self.assertIn("scan-semantics-version=3\n", outputs)
-            self.assertIn("tool_version=1.10.1\n", second.stdout)
+            self.assertIn("tool_version=1.10.2\n", second.stdout)
 
     def test_comparison_gates_require_baseline_before_output_cleanup(self) -> None:
         gate_combinations = (
@@ -142,6 +142,7 @@ class CheckRepoTests(unittest.TestCase):
             ("large-overflow", ("--large-file-mib", "1e308"), "--large-file-mib is too large"),
             ("include", ("--include-path", "../secret/*"), "path patterns"),
             ("exclude", ("--exclude-path", "/absolute/*"), "path patterns"),
+            ("exclude-dir", ("--exclude-dir", "nested/name"), "--exclude-dir values"),
             ("scope", ("--scope-id", "   "), "--scope-id"),
         )
         for label, invalid_arguments, message in cases:

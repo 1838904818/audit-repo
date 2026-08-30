@@ -238,6 +238,7 @@ def main() -> int:
             exclude_paths=args.exclude_path,
             scope_id=args.scope_id,
         )
+        exclude_dirs = collector.normalize_excluded_directory_names(args.exclude_dir)
     except collector.CollectionError as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
@@ -365,7 +366,7 @@ def main() -> int:
         common.append(f"--scope-id={scope_id}")
     append_values(common, "--include-path", include_paths)
     append_values(common, "--exclude-path", exclude_paths)
-    append_values(common, "--exclude-dir", args.exclude_dir)
+    append_values(common, "--exclude-dir", exclude_dirs)
 
     collect_json = [
         sys.executable, "-I", str(COLLECTOR), *common,

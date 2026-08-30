@@ -244,14 +244,16 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("id: leading_hyphen_inputs", ci)
         self.assertIn("scope-id: --scope:action-e2e", ci)
         self.assertIn('snapshot["include_path_patterns"] == ["*", "--include-probe/**"]', ci)
+        self.assertIn('snapshot["excluded_directory_names"] == ["--cache"]', ci)
         expected_failure_steps = (
             "attention_gate", "comparable_gate", "missing_baseline_gate",
             "digest_without_baseline", "malformed_digest", "digest_mismatch",
             "digest_mismatch_default", "invalid_max_files_explicit",
             "invalid_large_file_explicit", "invalid_include_explicit",
-            "invalid_exclude_explicit", "invalid_scope_explicit",
+            "invalid_exclude_explicit", "invalid_exclude_dirs_explicit", "invalid_scope_explicit",
             "non_git_tracked_explicit", "invalid_max_files_default",
-            "missing_root_default", "invalid_boolean", "managed_output_collision",
+            "invalid_exclude_dirs_default", "missing_root_default", "invalid_boolean",
+            "managed_output_collision",
         )
         for step_id in expected_failure_steps:
             self.assertEqual(ci.count(f"id: {step_id}\n"), 1)
@@ -277,7 +279,7 @@ class RepositoryContractTests(unittest.TestCase):
             self.assertIn(f"{environment_name}: ${{{{ steps.{step_id}.outcome }}}}", ci)
             outputs_name = environment_name.replace("_OUTCOME", "_OUTPUTS")
             self.assertIn(f"{outputs_name}: ${{{{ toJSON(steps.{step_id}.outputs) }}}}", ci)
-        for step_id in expected_failure_steps[7:15]:
+        for step_id in expected_failure_steps[7:17]:
             self.assertIn(f"steps.{step_id}.outcome", ci)
             self.assertIn(f"toJSON(steps.{step_id}.outputs)", ci)
         self.assertIn('default_parent.joinpath("invalid-collection-before.json")', ci)

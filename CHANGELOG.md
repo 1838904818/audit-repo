@@ -2,6 +2,20 @@
 
 All notable changes to `audit-repo` are documented here. The project follows semantic versioning.
 
+## [1.10.2] - 2026-08-31
+
+### Changed
+
+- Validate and normalize excluded directory names in both collector entry points and the one-command runner before any managed output or Action state can change.
+- Keep the established case-insensitive directory-name matching and support for names beginning with `-`, while deduplicating equivalent configured names.
+
+### Security
+
+- Reject empty or whitespace-only exclusions, path separators, `.`/`..` dot segments, and control characters instead of accepting ambiguous or non-portable directory paths as names.
+- Exercise invalid excluded-directory preflight in local integration tests and the Linux, Windows, and macOS composite-Action matrix while preserving all existing managed reports, GitHub outputs, and unallocated temporary-result state.
+
+Snapshot schema 1 and scan semantics 3 are unchanged. Snapshots made with identical settings that v1.10.2 still accepts remain comparable; review and replace any newly rejected legacy exclusion value before collecting a new comparison snapshot.
+
 ## [1.10.1] - 2026-08-31
 
 ### Changed
@@ -239,6 +253,7 @@ Because file classification changed, snapshots created before v1.9.0 have a diff
 
 - First stable release of the Codex Skill, repository signal collector, snapshot comparer, tests, and CI.
 
+[1.10.2]: https://github.com/1838904818/audit-repo/compare/v1.10.1...v1.10.2
 [1.10.1]: https://github.com/1838904818/audit-repo/compare/v1.10.0...v1.10.1
 [1.10.0]: https://github.com/1838904818/audit-repo/compare/v1.9.1...v1.10.0
 [1.9.1]: https://github.com/1838904818/audit-repo/compare/v1.9.0...v1.9.1

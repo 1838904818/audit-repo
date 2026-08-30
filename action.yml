@@ -26,7 +26,7 @@ inputs:
     description: Newline-separated non-empty root-relative POSIX exclude globs without parent traversal.
     default: ""
   exclude-dirs:
-    description: Newline-separated directory names to exclude.
+    description: Newline-separated non-empty single directory names without path separators, dot segments, or control characters.
     default: ""
   max-files:
     description: Positive integer maximum selected files before the scan is marked truncated.

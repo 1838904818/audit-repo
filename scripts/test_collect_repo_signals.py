@@ -311,9 +311,9 @@ class CollectRepoSignalsTests(unittest.TestCase):
             data = MODULE.collect(root, 100)
             rendered = MODULE.to_markdown(data)
 
-            self.assertEqual(data["tool_version"], "1.10.1")
+            self.assertEqual(data["tool_version"], "1.10.2")
             self.assertEqual(data["scan_semantics_version"], 3)
-            self.assertIn("Collector version: `1.10.1`", rendered)
+            self.assertIn("Collector version: `1.10.2`", rendered)
             self.assertIn("Scan semantics version: 3", rendered)
             self.assertFalse(data["git_repository"])
             self.assertEqual(data["test_file_count"], 1)
@@ -825,6 +825,52 @@ class CollectRepoSignalsTests(unittest.TestCase):
                     exclude_paths=exclude_paths,
                     scope_id=candidate_scope,
                 )
+
+    def test_excluded_directory_names_are_normalized_and_strictly_validated(self) -> None:
+        self.assertEqual(
+            MODULE.normalize_excluded_directory_names(["Build", "build", "--cache"]),
+            ["--cache", "build"],
+        )
+
+        for name in ("", "   ", ".", "..", "nested/name", "nested\\name", "line\nfeed", "bad\x7f"):
+            with self.subTest(name=repr(name)), self.assertRaisesRegex(
+                MODULE.CollectionError, "--exclude-dir values"
+            ):
+                MODULE.normalize_excluded_directory_names([name])
+
+        with tempfile.TemporaryDirectory() as temp_dir, self.assertRaisesRegex(
+            MODULE.CollectionError, "--exclude-dir values"
+        ):
+            MODULE.collect(Path(temp_dir), 100, exclude_dirs=["nested/name"])
+
+    def test_collector_rejects_invalid_excluded_directory_before_overwriting_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            root.joinpath("README.md").write_text("# Example\n", encoding="utf-8")
+            output = root / "existing.json"
+            original = b"preserve existing output\r\n"
+            output.write_bytes(original)
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(MODULE_PATH),
+                    str(root),
+                    "--exclude-dir=nested/name",
+                    "--format=json",
+                    f"--output={output}",
+                ],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=10,
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("--exclude-dir values", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertEqual(output.read_bytes(), original)
 
     def test_markdown_escapes_untrusted_paths(self) -> None:
         data = MODULE.collect(Path(__file__).parent, 100)
