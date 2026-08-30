@@ -284,7 +284,11 @@ class CheckRepoTests(unittest.TestCase):
             self.assertTrue(output_dir.name.startswith("audit-repo-"))
             self.assertTrue(output_dir.joinpath("snapshot.json").is_file())
             self.assertTrue(output_dir.joinpath("report.md").is_file())
-            self.assertIn(f"snapshot={output_dir / 'snapshot.json'}", result.stdout)
+            stdout_values = dict(line.split("=", 1) for line in result.stdout.splitlines())
+            self.assertEqual(
+                Path(stdout_values["snapshot"]).resolve(),
+                output_dir.joinpath("snapshot.json").resolve(),
+            )
 
     def test_rejects_temporary_output_parent_inside_repository(self) -> None:
         with tempfile.TemporaryDirectory() as repository_dir:
