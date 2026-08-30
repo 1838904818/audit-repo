@@ -305,7 +305,7 @@ class CheckRepoTests(unittest.TestCase):
 
     def test_preserves_parent_segments_after_repository_alias(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
+            root = Path(temp_dir).resolve()
             repository = root / "repository"
             subdirectory = repository / "subdirectory"
             subdirectory.mkdir(parents=True)
@@ -317,13 +317,14 @@ class CheckRepoTests(unittest.TestCase):
                 self.skipTest(f"directory symlinks unavailable: {error}")
 
             requested_output = alias / ".." / "results"
+            resolved_output = requested_output.resolve()
             result = self.run_check(
                 str(repository), "--scan-mode", "filesystem", "--output-dir", str(requested_output),
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertTrue((repository / "results" / "snapshot.json").is_file())
-            self.assertFalse((root / "results").exists())
+            self.assertTrue((resolved_output / "snapshot.json").is_file())
+            self.assertFalse((subdirectory / "results").exists())
 
     @unittest.skipUnless(os.name == "posix", "Git symlink boundary test requires POSIX")
     def test_runner_never_executes_git_from_lexical_symlink_worktree(self) -> None:

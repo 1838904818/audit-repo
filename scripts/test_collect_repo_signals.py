@@ -490,14 +490,14 @@ class CollectRepoSignalsTests(unittest.TestCase):
 
     def test_filesystem_enumeration_errors_mark_scan_incomplete(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
+            root = Path(temp_dir).resolve()
             (root / "ok.py").write_text("print('ok')", encoding="utf-8")
 
             def walk_with_error(_root: Path, *, followlinks: bool, onerror: object):
                 self.assertFalse(followlinks)
                 assert callable(onerror)
                 onerror(PermissionError("denied"))
-                yield str(root), [], ["ok.py"]
+                yield str(_root), [], ["ok.py"]
 
             with mock.patch.object(MODULE.os, "walk", side_effect=walk_with_error):
                 data = MODULE.collect(root, 100)
@@ -510,7 +510,7 @@ class CollectRepoSignalsTests(unittest.TestCase):
 
     def test_file_becoming_unavailable_during_analysis_marks_scan_incomplete(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
+            root = Path(temp_dir).resolve()
             readme = root / "README.md"
             readme.write_text("# Example", encoding="utf-8")
             original_stat = Path.stat
