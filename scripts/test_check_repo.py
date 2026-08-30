@@ -54,9 +54,9 @@ class CheckRepoTests(unittest.TestCase):
             self.assertIn("attention-count=0\n", outputs)
             self.assertIn("comparable=true\n", outputs)
             self.assertIn("sarif=", outputs)
-            self.assertIn("tool-version=1.8.1\n", outputs)
+            self.assertIn("tool-version=1.8.2\n", outputs)
             self.assertIn("scan-semantics-version=1\n", outputs)
-            self.assertIn("tool_version=1.8.1\n", second.stdout)
+            self.assertIn("tool_version=1.8.2\n", second.stdout)
 
     def test_github_outputs_use_multiline_records_for_untrusted_newlines(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -125,6 +125,79 @@ class CheckRepoTests(unittest.TestCase):
             self.assertEqual(second.returncode, 2)
             self.assertIn("baseline must not alias any generated output", second.stderr)
             self.assertEqual(baseline.read_bytes(), original)
+
+    def test_reused_output_dir_removes_stale_comparison_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as repository_dir, tempfile.TemporaryDirectory() as baseline_dir, \
+                tempfile.TemporaryDirectory() as output_dir:
+            repository = Path(repository_dir)
+            repository.joinpath("README.md").write_text("# Example\n", encoding="utf-8")
+            first = self.run_check(
+                repository_dir, "--scan-mode", "filesystem", "--scope-id", "test", "--output-dir", baseline_dir,
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+            baseline = Path(baseline_dir, "snapshot.json")
+            compared = self.run_check(
+                repository_dir, "--scan-mode", "filesystem", "--scope-id", "test",
+                "--output-dir", output_dir, "--baseline", str(baseline),
+            )
+            self.assertEqual(compared.returncode, 0, compared.stderr)
+            keep = Path(output_dir, "keep.txt")
+            keep.write_text("preserve me\n", encoding="utf-8")
+
+            current = self.run_check(
+                repository_dir, "--scan-mode", "filesystem", "--scope-id", "test", "--output-dir", output_dir,
+            )
+
+            self.assertEqual(current.returncode, 0, current.stderr)
+            self.assertTrue(Path(output_dir, "snapshot.json").is_file())
+            self.assertTrue(Path(output_dir, "report.md").is_file())
+            self.assertFalse(Path(output_dir, "comparison.json").exists())
+            self.assertFalse(Path(output_dir, "comparison.sarif").exists())
+            self.assertEqual(keep.read_text(encoding="utf-8"), "preserve me\n")
+
+    def test_failed_comparison_does_not_leave_prior_reports(self) -> None:
+        with tempfile.TemporaryDirectory() as repository_dir, tempfile.TemporaryDirectory() as baseline_dir, \
+                tempfile.TemporaryDirectory() as output_dir:
+            repository = Path(repository_dir)
+            repository.joinpath("README.md").write_text("# Example\n", encoding="utf-8")
+            first = self.run_check(
+                repository_dir, "--scan-mode", "filesystem", "--scope-id", "test", "--output-dir", baseline_dir,
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+            baseline = Path(baseline_dir, "snapshot.json")
+            compared = self.run_check(
+                repository_dir, "--scan-mode", "filesystem", "--scope-id", "test",
+                "--output-dir", output_dir, "--baseline", str(baseline),
+            )
+            self.assertEqual(compared.returncode, 0, compared.stderr)
+            invalid = Path(baseline_dir, "invalid.json")
+            invalid.write_text("{", encoding="utf-8")
+
+            failed = self.run_check(
+                repository_dir, "--scan-mode", "filesystem", "--scope-id", "test",
+                "--output-dir", output_dir, "--baseline", str(invalid),
+            )
+
+            self.assertEqual(failed.returncode, 2)
+            self.assertTrue(Path(output_dir, "snapshot.json").is_file())
+            for stale_name in ("report.md", "comparison.json", "comparison.sarif"):
+                self.assertFalse(Path(output_dir, stale_name).exists())
+
+    def test_managed_output_directory_collision_fails_without_recursive_removal(self) -> None:
+        with tempfile.TemporaryDirectory() as repository_dir, tempfile.TemporaryDirectory() as output_dir:
+            Path(repository_dir, "README.md").write_text("# Example\n", encoding="utf-8")
+            collision = Path(output_dir, "comparison.json")
+            collision.mkdir()
+            child = collision / "keep.txt"
+            child.write_text("preserve me\n", encoding="utf-8")
+
+            result = self.run_check(
+                repository_dir, "--scan-mode", "filesystem", "--output-dir", output_dir,
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("could not remove stale generated output", result.stderr)
+            self.assertEqual(child.read_text(encoding="utf-8"), "preserve me\n")
 
 
 if __name__ == "__main__":

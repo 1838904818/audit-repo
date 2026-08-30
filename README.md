@@ -122,6 +122,8 @@ python scripts/check_repo.py /path/to/repo \
   --fail-on-attention --require-comparable
 ```
 
+Before each run, the runner removes only those four managed output paths so reused directories cannot expose stale reports. It preserves every other entry and fails with exit code `2` instead of recursively deleting a managed-path directory collision.
+
 Use snapshot comparison in automation, failing both on high-confidence attention items and on an incomparable baseline:
 
 ```bash
@@ -152,7 +154,7 @@ Run `python scripts/collect_repo_signals.py --help` or `python scripts/compare_r
 Use the repository directly as a composite Action. Pin a release tag or commit SHA in production workflows:
 
 ```yaml
-- uses: 1838904818/audit-repo@v1.8.1
+- uses: 1838904818/audit-repo@v1.8.2
   id: audit
   with:
     scan-mode: tracked
@@ -165,7 +167,7 @@ The Action requires Python 3.10 or newer on the runner and does not install proj
 For a checked-in baseline, enable both policy gates:
 
 ```yaml
-- uses: 1838904818/audit-repo@v1.8.1
+- uses: 1838904818/audit-repo@v1.8.2
   with:
     baseline: .github/audit-baseline.json
     scan-mode: tracked
@@ -234,7 +236,7 @@ python -m unittest discover -s scripts -p "test_*.py"
 Build the same deterministic assets used by GitHub Releases:
 
 ```bash
-python scripts/package_skill.py --version v1.8.1 --output-dir dist
+python scripts/package_skill.py --version v1.8.2 --output-dir dist
 ```
 
 The requested package version must match `TOOL_VERSION` in `scripts/collect_repo_signals.py`.

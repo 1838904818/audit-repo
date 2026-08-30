@@ -22,7 +22,7 @@ SPEC.loader.exec_module(MODULE)
 def snapshot(**overrides: object) -> dict[str, object]:
     base: dict[str, object] = {
         "schema_version": 1,
-        "tool_version": "1.8.1",
+        "tool_version": "1.8.2",
         "scan_semantics_version": 1,
         "root": "/repo",
         "file_count": 10,
@@ -101,7 +101,7 @@ class CompareRepoSignalsTests(unittest.TestCase):
 
         self.assertEqual(sarif["version"], "2.1.0")
         self.assertEqual(run["tool"]["driver"]["name"], "audit-repo")
-        self.assertEqual(run["properties"]["beforeProvenance"]["tool_version"], "1.8.1")
+        self.assertEqual(run["properties"]["beforeProvenance"]["tool_version"], "1.8.2")
         self.assertEqual(run["properties"]["afterProvenance"]["scan_semantics_version"], 1)
         self.assertEqual({item["ruleId"] for item in rendered}, {"work-markers-increased", "comparison-limitation"})
         self.assertEqual({item["level"] for item in rendered}, {"warning", "note"})
@@ -214,7 +214,7 @@ class CompareRepoSignalsTests(unittest.TestCase):
 
         self.assertIn("Before scope ID: `api`", rendered)
         self.assertIn("After scope ID: `web`", rendered)
-        self.assertIn("Before collector version: `1.8.1`", rendered)
+        self.assertIn("Before collector version: `1.8.2`", rendered)
         self.assertIn("After scan semantics version: `1`", rendered)
         self.assertIn("Before included path globs: `packages/api/*`", rendered)
         self.assertIn("After excluded path globs: `packages/web/generated/*`", rendered)
@@ -399,6 +399,32 @@ class CompareRepoSignalsTests(unittest.TestCase):
                     with self.assertRaises(MODULE.SnapshotError):
                         MODULE.load_snapshot(path)
 
+    def test_rejects_duplicate_inventory_paths_but_preserves_case(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "snapshot.json"
+            duplicate_cases = (
+                snapshot(large_files=[
+                    {"path": "model.bin", "bytes": 5_000_000},
+                    {"path": "model.bin", "bytes": 7_000_000},
+                ]),
+                snapshot(sensitive_looking_files=[
+                    {"path": ".env", "tracked": True},
+                    {"path": ".env", "tracked": False},
+                ]),
+            )
+            for value in duplicate_cases:
+                with self.subTest(field="large_files" if value["large_files"] else "sensitive_looking_files"):
+                    path.write_text(json.dumps(value), encoding="utf-8")
+                    with self.assertRaisesRegex(MODULE.SnapshotError, "duplicate paths"):
+                        MODULE.load_snapshot(path)
+
+            case_distinct = snapshot(large_files=[
+                {"path": "A.bin", "bytes": 5_000_000},
+                {"path": "a.bin", "bytes": 5_000_000},
+            ])
+            path.write_text(json.dumps(case_distinct), encoding="utf-8")
+            self.assertEqual(len(MODULE.load_snapshot(path)["large_files"]), 2)
+
     def test_markdown_bounds_large_change_lists_but_json_remains_complete(self) -> None:
         added = [{"path": f"large-{index:02}.bin", "bytes": 10_000_000} for index in range(25)]
         result = MODULE.compare(snapshot(), snapshot(large_files=added))
@@ -541,6 +567,32 @@ class CompareRepoSignalsTests(unittest.TestCase):
             self.assertEqual(nested.returncode, 2)
             self.assertIn("error:", nested.stderr)
             self.assertNotIn("Traceback", nested.stderr)
+
+    def test_cli_rejects_duplicate_inventory_paths_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            before_path = Path(temp_dir) / "before.json"
+            after_path = Path(temp_dir) / "after.json"
+            before_path.write_text(json.dumps(snapshot()), encoding="utf-8")
+            after_path.write_text(
+                json.dumps(snapshot(sensitive_looking_files=[
+                    {"path": ".env", "tracked": True},
+                    {"path": ".env", "tracked": False},
+                ])),
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [sys.executable, str(MODULE_PATH), str(before_path), str(after_path)],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=10,
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("duplicate paths", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
 
     def test_cli_rejects_oversized_marker_counts_without_traceback(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

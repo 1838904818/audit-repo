@@ -5,7 +5,7 @@ inputs:
     description: Repository path to scan.
     default: .
   output-dir:
-    description: Directory for snapshot.json, report.md, and optional comparison.json.
+    description: Directory for snapshot.json, report.md, and optional comparison.json/comparison.sarif.
     default: audit-repo-results
   baseline:
     description: Optional path to an earlier audit-repo JSON snapshot.
@@ -51,10 +51,10 @@ outputs:
     description: Absolute path to comparison.sarif, or empty when no baseline was supplied.
     value: ${{ steps.audit.outputs.sarif }}
   attention-count:
-    description: Number of comparison attention items.
+    description: Number of comparison attention items, or 0 when no baseline was supplied.
     value: ${{ steps.audit.outputs.attention-count }}
   comparable:
-    description: Whether the baseline comparison is directly comparable.
+    description: Whether the baseline comparison is directly comparable, or empty when no baseline was supplied.
     value: ${{ steps.audit.outputs.comparable }}
   tool-version:
     description: Collector version recorded in the generated snapshot.

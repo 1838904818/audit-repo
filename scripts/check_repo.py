@@ -87,6 +87,17 @@ def paths_alias(first: Path, second: Path) -> bool:
     return os.path.samefile(first, second)
 
 
+def clear_managed_outputs(paths: tuple[Path, ...]) -> bool:
+    success = True
+    for path in paths:
+        try:
+            path.unlink(missing_ok=True)
+        except (OSError, UnicodeError) as error:
+            print(f"error: could not remove stale generated output {path}: {error}", file=sys.stderr)
+            success = False
+    return success
+
+
 def main() -> int:
     args = parse_args()
     try:
@@ -101,11 +112,12 @@ def main() -> int:
     report = output_dir / "report.md"
     comparison = output_dir / "comparison.json"
     sarif = output_dir / "comparison.sarif"
+    generated_outputs = (snapshot, report, comparison, sarif)
     if baseline is not None:
         try:
             baseline_aliases_output = any(
                 paths_alias(baseline, generated)
-                for generated in (snapshot, report, comparison, sarif)
+                for generated in generated_outputs
             )
         except OSError as error:
             print(f"error: could not verify baseline isolation: {error}", file=sys.stderr)
@@ -117,6 +129,8 @@ def main() -> int:
         output_dir.mkdir(parents=True, exist_ok=True)
     except OSError as error:
         print(f"error: could not create output directory: {error}", file=sys.stderr)
+        return 2
+    if not clear_managed_outputs(generated_outputs):
         return 2
 
     common = [

@@ -2,6 +2,15 @@
 
 All notable changes to `audit-repo` are documented here. The project follows semantic versioning.
 
+## [1.8.2] - 2026-08-31
+
+### Fixed
+
+- Reject snapshots with duplicate large-file or sensitive-file paths instead of using order-dependent last-write-wins comparison data.
+- Remove only the runner's four managed outputs before each run so a reused output directory cannot expose stale comparison reports or SARIF.
+- Fail closed on managed-output directory collisions without recursively deleting user files.
+- Clarify Action output behavior when no baseline is supplied.
+
 ## [1.8.1] - 2026-08-31
 
 ### Fixed
@@ -145,6 +154,7 @@ All notable changes to `audit-repo` are documented here. The project follows sem
 
 - First stable release of the Codex Skill, repository signal collector, snapshot comparer, tests, and CI.
 
+[1.8.2]: https://github.com/1838904818/audit-repo/compare/v1.8.1...v1.8.2
 [1.8.1]: https://github.com/1838904818/audit-repo/compare/v1.8.0...v1.8.1
 [1.8.0]: https://github.com/1838904818/audit-repo/compare/v1.7.2...v1.8.0
 [1.7.2]: https://github.com/1838904818/audit-repo/compare/v1.7.1...v1.7.2

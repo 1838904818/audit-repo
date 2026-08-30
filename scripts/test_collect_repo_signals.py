@@ -70,9 +70,9 @@ class CollectRepoSignalsTests(unittest.TestCase):
             data = MODULE.collect(root, 100)
             rendered = MODULE.to_markdown(data)
 
-            self.assertEqual(data["tool_version"], "1.8.1")
+            self.assertEqual(data["tool_version"], "1.8.2")
             self.assertEqual(data["scan_semantics_version"], 1)
-            self.assertIn("Collector version: `1.8.1`", rendered)
+            self.assertIn("Collector version: `1.8.2`", rendered)
             self.assertIn("Scan semantics version: 1", rendered)
             self.assertFalse(data["git_repository"])
             self.assertEqual(data["test_file_count"], 1)

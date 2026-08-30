@@ -42,6 +42,15 @@ def reject_json_constant(value: str) -> None:
     raise SnapshotError(f"non-finite JSON number is not supported: {value}")
 
 
+def validate_unique_paths(items: list[Any], field: str, source: Path) -> None:
+    seen: set[str] = set()
+    for item in items:
+        item_path = item["path"]
+        if item_path in seen:
+            raise SnapshotError(f"field {field!r} must not contain duplicate paths in {source}")
+        seen.add(item_path)
+
+
 def validate_snapshot(raw: dict[str, Any], path: Path) -> None:
     version = raw.get("schema_version", 1)
     if not isinstance(version, int) or isinstance(version, bool) or version not in SUPPORTED_SCHEMA_VERSIONS:
@@ -149,6 +158,9 @@ def validate_snapshot(raw: dict[str, Any], path: Path) -> None:
             or (tracked is not None and not isinstance(tracked, bool))
         ):
             raise SnapshotError(f"each 'sensitive_looking_files' item needs a string path and boolean/null tracked value in {path}")
+
+    validate_unique_paths(raw.get("large_files", []), "large_files", path)
+    validate_unique_paths(raw.get("sensitive_looking_files", []), "sensitive_looking_files", path)
 
     missing_fields = sorted(REQUIRED_SNAPSHOT_FIELDS - raw.keys())
     if missing_fields:
