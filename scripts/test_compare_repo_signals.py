@@ -22,8 +22,8 @@ SPEC.loader.exec_module(MODULE)
 def snapshot(**overrides: object) -> dict[str, object]:
     base: dict[str, object] = {
         "schema_version": 1,
-        "tool_version": "1.8.2",
-        "scan_semantics_version": 1,
+        "tool_version": "1.9.0",
+        "scan_semantics_version": 2,
         "root": "/repo",
         "file_count": 10,
         "scan_mode": "filesystem",
@@ -101,8 +101,8 @@ class CompareRepoSignalsTests(unittest.TestCase):
 
         self.assertEqual(sarif["version"], "2.1.0")
         self.assertEqual(run["tool"]["driver"]["name"], "audit-repo")
-        self.assertEqual(run["properties"]["beforeProvenance"]["tool_version"], "1.8.2")
-        self.assertEqual(run["properties"]["afterProvenance"]["scan_semantics_version"], 1)
+        self.assertEqual(run["properties"]["beforeProvenance"]["tool_version"], "1.9.0")
+        self.assertEqual(run["properties"]["afterProvenance"]["scan_semantics_version"], 2)
         self.assertEqual({item["ruleId"] for item in rendered}, {"work-markers-increased", "comparison-limitation"})
         self.assertEqual({item["level"] for item in rendered}, {"warning", "note"})
         self.assertIn("not confirmed vulnerabilities", run["properties"]["notice"])
@@ -130,7 +130,7 @@ class CompareRepoSignalsTests(unittest.TestCase):
         same = MODULE.compare(snapshot(tool_version="1.7.0"), snapshot(tool_version="1.8.0"))
         self.assertTrue(same["summary"]["comparable"])
 
-        changed = MODULE.compare(snapshot(), snapshot(scan_semantics_version=2, ci_files=[]))
+        changed = MODULE.compare(snapshot(), snapshot(scan_semantics_version=3, ci_files=[]))
         self.assertFalse(changed["summary"]["logical_scope_comparable"])
         self.assertEqual(changed["attention"], [])
         self.assertTrue(any("semantics versions differ" in item for item in changed["limitations"]))
@@ -204,6 +204,29 @@ class CompareRepoSignalsTests(unittest.TestCase):
         self.assertTrue(any("roots differ" in item for item in without_id["limitations"]))
         self.assertTrue(with_id["summary"]["comparable"])
 
+    def test_legacy_implicit_scope_id_does_not_authorize_cross_root_comparison(self) -> None:
+        same_root = MODULE.compare(snapshot(scope_id="repository"), snapshot(scope_id=None))
+        different_legacy = MODULE.compare(
+            snapshot(root="/runner-a/repo", scope_id="repository"),
+            snapshot(root="/runner-b/repo", scope_id="repository"),
+        )
+
+        self.assertTrue(same_root["summary"]["comparable"])
+        self.assertFalse(different_legacy["summary"]["comparable"])
+        self.assertTrue(any("roots differ" in item for item in different_legacy["limitations"]))
+        self.assertEqual(different_legacy["before_scan_scope"]["scope_id"], "repository")
+
+    def test_v18_same_root_baseline_requires_regeneration_for_semantics_v2(self) -> None:
+        result = MODULE.compare(
+            snapshot(tool_version="1.8.2", scan_semantics_version=1, scope_id="repository"),
+            snapshot(tool_version="1.9.0", scan_semantics_version=2, scope_id=None),
+        )
+
+        self.assertFalse(result["summary"]["comparable"])
+        self.assertTrue(any("semantics versions differ" in item for item in result["limitations"]))
+        self.assertFalse(any("scope IDs differ" in item for item in result["limitations"]))
+        self.assertFalse(any("roots differ" in item for item in result["limitations"]))
+
     def test_comparison_markdown_displays_both_complete_path_scopes(self) -> None:
         result = MODULE.compare(
             snapshot(scope_id="api", include_path_patterns=["packages/api/*"]),
@@ -214,8 +237,8 @@ class CompareRepoSignalsTests(unittest.TestCase):
 
         self.assertIn("Before scope ID: `api`", rendered)
         self.assertIn("After scope ID: `web`", rendered)
-        self.assertIn("Before collector version: `1.8.2`", rendered)
-        self.assertIn("After scan semantics version: `1`", rendered)
+        self.assertIn("Before collector version: `1.9.0`", rendered)
+        self.assertIn("After scan semantics version: `2`", rendered)
         self.assertIn("Before included path globs: `packages/api/*`", rendered)
         self.assertIn("After excluded path globs: `packages/web/generated/*`", rendered)
 
@@ -369,6 +392,12 @@ class CompareRepoSignalsTests(unittest.TestCase):
                         json.dumps({"schema_version": 1, "scope_id": invalid_scope_id}),
                         encoding="utf-8",
                     )
+                    with self.assertRaises(MODULE.SnapshotError):
+                        MODULE.load_snapshot(path)
+
+            for invalid_root in (None, "", "   ", 1, []):
+                with self.subTest(root=invalid_root):
+                    path.write_text(json.dumps(snapshot(root=invalid_root)), encoding="utf-8")
                     with self.assertRaises(MODULE.SnapshotError):
                         MODULE.load_snapshot(path)
 

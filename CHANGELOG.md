@@ -2,6 +2,33 @@
 
 All notable changes to `audit-repo` are documented here. The project follows semantic versioning.
 
+## [1.9.0] - 2026-08-31
+
+### Added
+
+- Recognize Django `tests.py`, conventional case-sensitive .NET `*Tests.cs` files, canonically cased Pipenv, SwiftPM, .NET project/solution manifests, NuGet lockfiles including project-specific names, and Bun lockfiles.
+- Recognize SwiftPM version-specific manifests such as `Package@swift-5.10.swift`.
+- Restrict CI inventory and GitHub Action-reference extraction to canonical CI entry points and actual top-level GitHub workflow YAML files; ignore `uses:` text inside YAML block scalars.
+
+### Changed
+
+- Advance scan semantics to version 2 for the expanded, lower-noise file classification rules.
+- Leave scope IDs unset by default in the runner and composite Action.
+- Treat the legacy implicit scope ID `repository` as unset, so it cannot authorize comparison across different repository roots.
+- Create the Action's default output directory under `RUNNER_TEMP` instead of inside the audited checkout.
+
+### Fixed
+
+- Reject empty snapshot roots so unknown origins cannot pass the comparability gate.
+- Reject output paths that traverse repository-contained symbolic links instead of letting an untrusted checkout redirect managed writes.
+- Make the Skill's prompt-injection and repository-code execution trust boundary explicit.
+- Resolve Git only from absolute `PATH` directories outside both the lexical scan-entry worktree and the resolved target boundary, using filesystem identity to resist current-directory, monorepo-sibling, symlink-entry, and case-variant executable hijacking.
+- Leave worktree cleanliness unknown instead of invoking broader repository-aware status machinery.
+- Disable repository-configured Git hooks and filesystem monitors, suppress optional locks and prompts, and discard inherited `GIT_*` targeting/configuration overrides.
+- Run the composite Action's Python processes in isolated mode so checkout-local modules cannot shadow the standard library or runner code imports.
+
+Because file classification changed, snapshots created before v1.9.0 have a different scan-semantics version and are intentionally not directly comparable. Review the classification changes and regenerate approved baselines. For future cross-root comparisons, set the same repository-qualified scope ID on both snapshots.
+
 ## [1.8.2] - 2026-08-31
 
 ### Fixed
@@ -154,6 +181,7 @@ All notable changes to `audit-repo` are documented here. The project follows sem
 
 - First stable release of the Codex Skill, repository signal collector, snapshot comparer, tests, and CI.
 
+[1.9.0]: https://github.com/1838904818/audit-repo/compare/v1.8.2...v1.9.0
 [1.8.2]: https://github.com/1838904818/audit-repo/compare/v1.8.1...v1.8.2
 [1.8.1]: https://github.com/1838904818/audit-repo/compare/v1.8.0...v1.8.1
 [1.8.0]: https://github.com/1838904818/audit-repo/compare/v1.7.2...v1.8.0

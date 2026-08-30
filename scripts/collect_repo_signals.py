@@ -25,12 +25,19 @@ SKIP_DIRS = {
 MANIFESTS = {
     "Cargo.toml", "Gemfile", "go.mod", "package.json", "pom.xml",
     "pyproject.toml", "requirements.txt", "setup.cfg", "setup.py",
-    "build.gradle", "build.gradle.kts", "composer.json",
+    "build.gradle", "build.gradle.kts", "composer.json", "Pipfile",
+    "Package.swift",
 }
+MANIFEST_SUFFIXES = (".csproj", ".fsproj", ".vbproj", ".sln", ".slnx")
 LOCKFILES = {
     "Cargo.lock", "Gemfile.lock", "composer.lock", "go.sum", "package-lock.json",
-    "pnpm-lock.yaml", "poetry.lock", "uv.lock", "yarn.lock",
+    "pnpm-lock.yaml", "poetry.lock", "uv.lock", "yarn.lock", "Pipfile.lock",
+    "Package.resolved", "packages.lock.json", "bun.lock", "bun.lockb",
 }
+SWIFTPM_VERSIONED_MANIFEST_RE = re.compile(
+    r"^Package@swift-[1-9][0-9]*(?:\.[0-9]+){0,2}\.swift$"
+)
+NUGET_PROJECT_LOCK_RE = re.compile(r"^packages\..+\.lock\.json$")
 DOC_FILES = {"readme", "readme.md", "readme.rst", "readme.txt", "skill.md"}
 POLICY_FILES = {
     "contributing": {"contributing", "contributing.md", "contributing.rst"},
@@ -75,7 +82,7 @@ SENSITIVE_PATHS = {
 }
 ENV_EXAMPLE_NAMES = {".env.dist", ".env.example", ".env.sample", ".env.template", "example.env"}
 ENV_EXAMPLE_SUFFIXES = (".dist", ".example", ".sample", ".template")
-CI_ROOT_FILES = {"azure-pipelines.yml", "bitbucket-pipelines.yml", "jenkinsfile", ".gitlab-ci.yml"}
+CI_ROOT_FILES = {"azure-pipelines.yml", "bitbucket-pipelines.yml", "Jenkinsfile", ".gitlab-ci.yml"}
 DEPENDENCY_UPDATE_PATHS = {
     ".github/dependabot.yaml", ".github/dependabot.yml", ".renovaterc",
     ".renovaterc.json", "renovate.json", "renovate.json5",
@@ -92,11 +99,23 @@ TOOL_CONFIG_NAMES = {
 }
 LARGE_FILE_BYTES = 5 * 1024 * 1024
 SCHEMA_VERSION = 1
-TOOL_VERSION = "1.8.2"
-SCAN_SEMANTICS_VERSION = 1
+TOOL_VERSION = "1.9.0"
+SCAN_SEMANTICS_VERSION = 2
+DISABLED_GIT_HOOKS_PATH = Path(__file__).resolve().as_posix()
 SCAN_MODES = {"filesystem", "git-visible", "tracked"}
 WORK_MARKER_RE = re.compile(r"(?im)(?:#|//|/\*+|<!--|;|--)\s*(TODO|FIXME|HACK|XXX)\b")
-CI_ACTION_RE = re.compile(r"(?m)^\s*-?\s*uses:\s*['\"]?([^'\"#\s]+)")
+CI_ACTION_RE = re.compile(
+    r"^\s*-?\s*(?P<key_quote>['\"]?)uses(?P=key_quote)\s*:"
+    r"\s*(?P<quote>['\"]?)(?P<value>[^'\"#\s]+)(?P=quote)"
+    r"\s*(?:#.*)?$"
+)
+YAML_BLOCK_SCALAR_RE = re.compile(
+    r"^(?P<indent> *)(?P<sequence>-\s+)?(?P<key>[^#:\n]+?)\s*:\s*"
+    r"(?:[!&][^\s#]+\s+)*[|>]"
+    r"(?:[+-]?[1-9]?|[1-9][+-]?)?\s*(?:#.*)?$"
+)
+ACTION_REFERENCE_VALUE_RE = re.compile(r"^[^'\"#\s]+$")
+GITHUB_WORKFLOW_RE = re.compile(r"^\.github/workflows/[^/]+\.(?:yml|yaml)$")
 MAKE_TARGET_RE = re.compile(r"(?m)^([A-Za-z0-9_.-]+)\s*:(?!=)")
 PYPROJECT_TOOL_RE = re.compile(r"(?m)^\[tool\.([A-Za-z0-9_-]+)(?:\.[^]]+)?\]\s*$")
 
@@ -225,8 +244,117 @@ def normalize_git_path(value: bytes) -> str | None:
     return normalized
 
 
-def git_file_names(root: Path, mode: str, *options: str) -> set[str]:
-    arguments = ["git", "-C", str(root), "ls-files", "-z", *options, "--", "."]
+def path_is_within(path: Path, directory: Path) -> bool:
+    try:
+        directory_stat = directory.stat()
+    except (OSError, ValueError):
+        directory_stat = None
+    if directory_stat is not None:
+        for candidate in (path, *path.parents):
+            try:
+                if os.path.samestat(candidate.stat(), directory_stat):
+                    return True
+            except (OSError, ValueError):
+                continue
+    try:
+        path.relative_to(directory)
+    except ValueError:
+        return False
+    return True
+
+
+def absolute_without_symlink_resolution(path: Path) -> Path:
+    expanded = path.expanduser()
+    if expanded.drive and not expanded.is_absolute():
+        raise ValueError("drive-relative paths are not supported")
+    return expanded if expanded.is_absolute() else Path.cwd() / expanded
+
+
+def git_worktree_boundary(root: Path) -> Path:
+    try:
+        lexical_root = absolute_without_symlink_resolution(root)
+    except (OSError, RuntimeError, ValueError):
+        lexical_root = root
+    boundary = lexical_root
+    for candidate in (lexical_root, *lexical_root.parents):
+        try:
+            candidate.joinpath(".git").lstat()
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError:
+            boundary = candidate
+            continue
+        boundary = candidate
+    try:
+        return boundary.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return boundary
+
+
+def resolve_git_executable(
+    root: Path, git_untrusted_roots: Iterable[Path] = (),
+) -> Path | None:
+    untrusted_boundaries: set[Path] = set()
+    for source in (root, *tuple(git_untrusted_roots)):
+        untrusted_boundaries.add(git_worktree_boundary(source))
+        try:
+            untrusted_boundaries.add(git_worktree_boundary(source.resolve()))
+        except (OSError, RuntimeError):
+            pass
+    path_value = os.environ.get("PATH", "")
+    executable_names = ("git.exe", "git.com") if os.name == "nt" else ("git",)
+    for raw_directory in path_value.split(os.pathsep):
+        directory_text = raw_directory.strip().strip('"')
+        if not directory_text:
+            continue
+        directory = Path(directory_text)
+        if not directory.is_absolute():
+            continue
+        for executable_name in executable_names:
+            candidate = directory / executable_name
+            try:
+                if not candidate.is_file():
+                    continue
+                resolved = candidate.resolve(strict=True)
+            except (OSError, RuntimeError):
+                continue
+            if any(path_is_within(resolved, boundary) for boundary in untrusted_boundaries):
+                continue
+            if os.name != "nt" and not os.access(resolved, os.X_OK):
+                continue
+            return resolved
+    return None
+
+
+def git_command(git_executable: Path, root: Path, *arguments: str) -> list[str]:
+    return [
+        str(git_executable),
+        "-c", f"core.hooksPath={DISABLED_GIT_HOOKS_PATH}",
+        "-c", "core.fsmonitor=false",
+        "-c", "core.pager=cat",
+        "-C", str(root),
+        *arguments,
+    ]
+
+
+def git_environment() -> dict[str, str]:
+    environment = {
+        key: value for key, value in os.environ.items()
+        if not key.upper().startswith("GIT_")
+    }
+    environment["GIT_OPTIONAL_LOCKS"] = "0"
+    environment["GIT_PAGER"] = "cat"
+    environment["GIT_TERMINAL_PROMPT"] = "0"
+    return environment
+
+
+def git_file_names(
+    root: Path, mode: str, *options: str, git_untrusted_roots: Iterable[Path] = (),
+) -> set[str]:
+    git_executable = resolve_git_executable(root, git_untrusted_roots)
+    if git_executable is None:
+        raise CollectionError("Git is required for the requested scan mode")
+    arguments = git_command(git_executable, root, "ls-files", "-z", *options, "--", ".")
     try:
         result = subprocess.run(
             arguments,
@@ -234,6 +362,7 @@ def git_file_names(root: Path, mode: str, *options: str) -> set[str]:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             timeout=30,
+            env=git_environment(),
         )
     except FileNotFoundError as error:
         raise CollectionError("Git is required for the requested scan mode") from error
@@ -258,11 +387,15 @@ def git_scan_files(
     exclude_dirs: Iterable[str] = (),
     include_paths: Iterable[str] = (),
     exclude_paths: Iterable[str] = (),
+    git_untrusted_roots: Iterable[Path] = (),
 ) -> tuple[list[Path], bool, set[str], list[str]]:
-    tracked = git_file_names(root, mode, "--cached")
+    untrusted_roots = tuple(git_untrusted_roots)
+    tracked = git_file_names(root, mode, "--cached", git_untrusted_roots=untrusted_roots)
     names = set(tracked)
     if mode == "git-visible":
-        names.update(git_file_names(root, mode, "--others", "--exclude-standard"))
+        names.update(git_file_names(
+            root, mode, "--others", "--exclude-standard", git_untrusted_roots=untrusted_roots,
+        ))
     skipped = SKIP_DIRS | {name.lower() for name in exclude_dirs}
     selected: list[Path] = []
     missing_count = 0
@@ -296,14 +429,18 @@ def git_scan_files(
     return selected, truncated, tracked, incomplete_reasons
 
 
-def git_tracked_files(root: Path) -> set[str] | None:
+def git_tracked_files(root: Path, git_untrusted_roots: Iterable[Path] = ()) -> set[str] | None:
+    git_executable = resolve_git_executable(root, git_untrusted_roots)
+    if git_executable is None:
+        return None
     try:
         result = subprocess.run(
-            ["git", "-C", str(root), "ls-files", "-z", "--cached", "--", "."],
+            git_command(git_executable, root, "ls-files", "-z", "--cached", "--", "."),
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             timeout=30,
+            env=git_environment(),
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return None
@@ -318,14 +455,20 @@ def git_tracked_files(root: Path) -> set[str] | None:
     return tracked
 
 
-def git_output(root: Path, *args: str) -> str | None:
+def git_output(
+    root: Path, *args: str, git_untrusted_roots: Iterable[Path] = (),
+) -> str | None:
+    git_executable = resolve_git_executable(root, git_untrusted_roots)
+    if git_executable is None:
+        return None
     try:
         result = subprocess.run(
-            ["git", "-C", str(root), *args],
+            git_command(git_executable, root, *args),
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             timeout=10,
+            env=git_environment(),
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return None
@@ -334,18 +477,22 @@ def git_output(root: Path, *args: str) -> str | None:
     return decode_git_path(result.stdout).strip()
 
 
-def git_metadata(root: Path, tracked: set[str] | None) -> dict[str, Any]:
+def git_metadata(
+    root: Path, tracked: set[str] | None, git_untrusted_roots: Iterable[Path] = (),
+) -> dict[str, Any]:
     if tracked is None:
         return {"repository": False, "branch": None, "working_tree": "unknown", "tracked_file_count": None}
-    branch = git_output(root, "branch", "--show-current")
+    untrusted_roots = tuple(git_untrusted_roots)
+    branch = git_output(root, "branch", "--show-current", git_untrusted_roots=untrusted_roots)
     if not branch:
-        commit = git_output(root, "rev-parse", "--short", "HEAD")
+        commit = git_output(
+            root, "rev-parse", "--short", "HEAD", git_untrusted_roots=untrusted_roots,
+        )
         branch = f"detached@{commit}" if commit else "detached"
-    status = git_output(root, "status", "--porcelain")
     return {
         "repository": True,
         "branch": branch,
-        "working_tree": "unknown" if status is None else ("dirty" if status else "clean"),
+        "working_tree": "unknown",
         "tracked_file_count": len(tracked),
     }
 
@@ -373,13 +520,40 @@ def contains_marker(path: Path, unavailable_paths: set[str] | None = None) -> Co
 def is_test(path_text: str) -> bool:
     parts = path_text.lower().split("/")
     name = parts[-1]
+    original_name = path_text.rsplit("/", 1)[-1]
     return (
         any(part in {"test", "tests", "spec", "specs", "__tests__"} for part in parts[:-1])
         or name.startswith("test_")
+        or original_name == "tests.py"
         or ".test." in name
         or ".spec." in name
         or name.endswith("_test.go")
+        or original_name.endswith("Tests.cs")
     )
+
+
+def is_github_workflow(path_text: str) -> bool:
+    return GITHUB_WORKFLOW_RE.fullmatch(path_text) is not None
+
+
+def is_ci_file(path_text: str) -> bool:
+    return (
+        path_text in CI_ROOT_FILES
+        or path_text == ".circleci/config.yml"
+        or is_github_workflow(path_text)
+    )
+
+
+def is_manifest(path_text: str) -> bool:
+    name = exact_path_name(path_text)
+    if name in MANIFESTS or SWIFTPM_VERSIONED_MANIFEST_RE.fullmatch(name):
+        return True
+    return any(len(name) > len(suffix) and name.endswith(suffix) for suffix in MANIFEST_SUFFIXES)
+
+
+def is_lockfile(path_text: str) -> bool:
+    name = exact_path_name(path_text)
+    return name in LOCKFILES or NUGET_PROJECT_LOCK_RE.fullmatch(name) is not None
 
 
 def is_environment_example_name(name: str) -> bool:
@@ -458,11 +632,42 @@ def ci_action_references(
 ) -> list[str]:
     references: set[str] = set()
     for path, rel in zip(files, rel_files):
-        if not rel.lower().startswith(".github/workflows/") or is_sensitive_filename(rel):
+        if not is_github_workflow(rel) or is_sensitive_filename(rel):
             continue
         text = read_small_text(path, unavailable_paths)
         if text is not None:
-            references.update(CI_ACTION_RE.findall(text))
+            lines = text.splitlines()
+            index = 0
+            while index < len(lines):
+                line = lines[index]
+                block_match = YAML_BLOCK_SCALAR_RE.fullmatch(line)
+                if block_match:
+                    block_parent_indent = len(block_match.group("indent")) + len(
+                        block_match.group("sequence") or ""
+                    )
+                    block_values: list[str] = []
+                    index += 1
+                    while index < len(lines):
+                        block_line = lines[index]
+                        if block_line.strip() and len(block_line) - len(block_line.lstrip(" ")) <= block_parent_indent:
+                            break
+                        if block_line.strip():
+                            block_values.append(block_line.strip())
+                        index += 1
+                    key = block_match.group("key").strip()
+                    if len(key) >= 2 and key[0] == key[-1] and key[0] in "'\"":
+                        key = key[1:-1]
+                    if (
+                        key == "uses"
+                        and len(block_values) == 1
+                        and ACTION_REFERENCE_VALUE_RE.fullmatch(block_values[0])
+                    ):
+                        references.add(block_values[0])
+                    continue
+                action_match = CI_ACTION_RE.fullmatch(line)
+                if action_match:
+                    references.add(action_match.group("value"))
+                index += 1
     return sorted(references)
 
 
@@ -475,7 +680,14 @@ def collect(
     include_paths: Iterable[str] = (),
     exclude_paths: Iterable[str] = (),
     scope_id: str | None = None,
+    git_untrusted_roots: Iterable[Path] = (),
 ) -> dict[str, Any]:
+    root_candidate = root
+    try:
+        root = root_candidate.resolve()
+    except (OSError, RuntimeError) as error:
+        raise CollectionError(f"could not resolve the scan root: {error}") from error
+    untrusted_roots = (root_candidate, *tuple(git_untrusted_roots))
     if scan_mode not in SCAN_MODES:
         raise CollectionError(f"unsupported scan mode: {scan_mode}")
     if max_files < 1:
@@ -493,7 +705,7 @@ def collect(
             include_paths=included_patterns,
             exclude_paths=excluded_patterns,
         )
-        tracked = git_tracked_files(root)
+        tracked = git_tracked_files(root, git_untrusted_roots=untrusted_roots)
     else:
         files, truncated, tracked, scan_incomplete_reasons = git_scan_files(
             root,
@@ -502,6 +714,7 @@ def collect(
             excluded,
             include_paths=included_patterns,
             exclude_paths=excluded_patterns,
+            git_untrusted_roots=untrusted_roots,
         )
     rel_files = [relative(path, root) for path in files]
 
@@ -535,21 +748,16 @@ def collect(
         if test_file:
             tests.append(rel)
 
-    ci_files = [
-        rel for rel in rel_files
-        if rel.lower() in CI_ROOT_FILES
-        or rel.lower().startswith(".github/workflows/")
-        or rel.lower().startswith(".circleci/")
-    ]
-    manifests = [rel for rel in rel_files if path_name(rel) in {x.lower() for x in MANIFESTS}]
-    lockfiles = [rel for rel in rel_files if path_name(rel) in {x.lower() for x in LOCKFILES}]
+    ci_files = [rel for rel in rel_files if is_ci_file(rel)]
+    manifests = [rel for rel in rel_files if is_manifest(rel)]
+    lockfiles = [rel for rel in rel_files if is_lockfile(rel)]
     license_files = [rel for rel in rel_files if path_name(rel).startswith(("license", "licence", "copying"))]
     env_examples = [rel for rel in rel_files if is_environment_example_name(path_name(rel))]
     automation = project_automation(files, rel_files, analysis_unavailable_paths)
     action_references = ci_action_references(files, rel_files, analysis_unavailable_paths)
     if analysis_unavailable_paths and "paths_unavailable_during_analysis" not in scan_incomplete_reasons:
         scan_incomplete_reasons.append("paths_unavailable_during_analysis")
-    git = git_metadata(root, tracked)
+    git = git_metadata(root, tracked, git_untrusted_roots=untrusted_roots)
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -601,6 +809,10 @@ def collect(
 
 def path_name(rel: str) -> str:
     return rel.rsplit("/", 1)[-1].lower()
+
+
+def exact_path_name(rel: str) -> str:
+    return rel.rsplit("/", 1)[-1]
 
 
 def markdown_code(value: object) -> str:
@@ -749,7 +961,8 @@ def parse_args() -> argparse.Namespace:
         help="Exclude matching root-relative POSIX paths (repeatable)",
     )
     parser.add_argument(
-        "--scope-id", help="Stable logical scope identifier recorded for snapshot comparison",
+        "--scope-id",
+        help="Project-qualified logical scope ID used to compare equivalent roots (unset by default)",
     )
     parser.add_argument(
         "--large-file-mib", type=float, default=5.0, metavar="MIB",
@@ -766,7 +979,12 @@ def to_json(data: dict[str, Any]) -> str:
 
 def main() -> int:
     args = parse_args()
-    root = Path(args.path).expanduser().resolve()
+    try:
+        root_candidate = absolute_without_symlink_resolution(Path(args.path))
+        root = root_candidate.resolve()
+    except (OSError, RuntimeError, ValueError) as error:
+        print(f"error: could not resolve the scan root: {error}", file=sys.stderr)
+        return 2
     if not root.is_dir():
         print(f"error: not a directory: {root}", file=sys.stderr)
         return 2
@@ -782,7 +1000,7 @@ def main() -> int:
         return 2
     try:
         data = collect(
-            root,
+            root_candidate,
             args.max_files,
             exclude_dirs=args.exclude_dir,
             large_file_bytes=max(1, int(threshold_bytes)),

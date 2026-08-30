@@ -13,6 +13,7 @@ from typing import Any, Iterable
 
 SUPPORTED_SCHEMA_VERSIONS = {1}
 SCAN_MODES = {"filesystem", "git-visible", "tracked"}
+LEGACY_IMPLICIT_SCOPE_IDS = {"repository"}
 REQUIRED_SNAPSHOT_FIELDS = {
     "root", "file_count", "scan_truncated", "excluded_directory_names",
     "work_markers", "large_file_threshold_bytes", "large_files",
@@ -102,8 +103,10 @@ def validate_snapshot(raw: dict[str, Any], path: Path) -> None:
         raise SnapshotError(f"field 'scan_truncated' must be a boolean in {path}")
     if "large_files_complete" in raw and not isinstance(raw["large_files_complete"], bool):
         raise SnapshotError(f"field 'large_files_complete' must be a boolean in {path}")
-    if "root" in raw and raw["root"] is not None and not isinstance(raw["root"], str):
-        raise SnapshotError(f"field 'root' must be a string or null in {path}")
+    if "root" in raw and (
+        not isinstance(raw["root"], str) or not raw["root"].strip()
+    ):
+        raise SnapshotError(f"field 'root' must be a non-empty string in {path}")
     if "scan_mode" in raw and (
         not isinstance(raw["scan_mode"], str) or raw["scan_mode"] not in SCAN_MODES
     ):
@@ -245,6 +248,12 @@ def scan_scope(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def effective_scope_id(value: object) -> object:
+    if value is None or (isinstance(value, str) and value in LEGACY_IMPLICIT_SCOPE_IDS):
+        return None
+    return value
+
+
 def logical_scope_limitations(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
     limitations: list[str] = []
     before_has_semantics = "scan_semantics_version" in before
@@ -268,13 +277,16 @@ def logical_scope_limitations(before: dict[str, Any], after: dict[str, Any]) -> 
         "scan_mode": "scan modes",
         "include_path_patterns": "included path globs",
         "exclude_path_patterns": "excluded path globs",
-        "scope_id": "scope IDs",
     }
     for field, label in labels.items():
         if before_scope[field] != after_scope[field]:
             limitations.append(f"The {label} differ between snapshots, so the logical scan scopes are not equivalent.")
+    before_scope_id = effective_scope_id(before_scope["scope_id"])
+    after_scope_id = effective_scope_id(after_scope["scope_id"])
+    if before_scope_id != after_scope_id:
+        limitations.append("The scope IDs differ between snapshots, so the logical scan scopes are not equivalent.")
     roots_differ = before.get("root") != after.get("root")
-    shared_scope_id = bool(before_scope["scope_id"]) and before_scope["scope_id"] == after_scope["scope_id"]
+    shared_scope_id = bool(before_scope_id) and before_scope_id == after_scope_id
     if roots_differ and not shared_scope_id:
         limitations.append(
             "The snapshot roots differ without a shared non-empty scope ID, so equivalent logical scope cannot be confirmed."

@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import re
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 from urllib.parse import unquote
@@ -98,6 +101,32 @@ class RepositoryContractTests(unittest.TestCase):
             "tool-version", "scan-semantics-version",
         ):
             self.assertRegex(action, rf"(?m)^  {re.escape(name)}:\s*$")
+        self.assertRegex(action, r'(?ms)^  scope-id:\s*\n.*?^    default: ""\s*$')
+        self.assertRegex(action, r'(?ms)^  output-dir:\s*\n.*?^    default: ""\s*$')
+        self.assertIn('if [[ -n "$AUDIT_SCOPE_ID" ]]', action)
+        self.assertIn('tempfile.mkdtemp(prefix="audit-repo-", dir=os.environ["RUNNER_TEMP"])', action)
+        self.assertIn('AUDIT_OUTPUT_DIR="$(python -I -c', action)
+        self.assertIn('python -I "$GITHUB_ACTION_PATH/scripts/check_repo.py"', action)
+        self.assertNotRegex(action, r'(?m)^\s*args=\([^\n]*--scope-id')
+
+    def test_python_isolated_mode_ignores_checkout_module_shadowing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            marker = root / "shadow-imported"
+            root.joinpath("tempfile.py").write_text(
+                "from pathlib import Path\nPath('shadow-imported').write_text('unsafe')\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [sys.executable, "-I", "-c", "import tempfile; assert hasattr(tempfile, 'mkdtemp')"],
+                cwd=root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(marker.exists())
 
     def test_release_workflow_validates_assets_and_is_rerunnable(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")

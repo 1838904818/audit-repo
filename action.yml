@@ -5,8 +5,8 @@ inputs:
     description: Repository path to scan.
     default: .
   output-dir:
-    description: Directory for snapshot.json, report.md, and optional comparison.json/comparison.sarif.
-    default: audit-repo-results
+    description: Output directory; blank creates a unique directory under RUNNER_TEMP.
+    default: ""
   baseline:
     description: Optional path to an earlier audit-repo JSON snapshot.
     default: ""
@@ -14,8 +14,8 @@ inputs:
     description: filesystem, git-visible, or tracked.
     default: tracked
   scope-id:
-    description: Stable logical scope identifier used for comparison.
-    default: repository
+    description: Project-qualified logical scope ID used to compare equivalent roots.
+    default: ""
   include-paths:
     description: Newline-separated root-relative include globs.
     default: ""
@@ -81,11 +81,15 @@ runs:
         AUDIT_FAIL_ON_ATTENTION: ${{ inputs.fail-on-attention }}
         AUDIT_REQUIRE_COMPARABLE: ${{ inputs.require-comparable }}
       run: |
-        args=("$AUDIT_PATH" --output-dir "$AUDIT_OUTPUT_DIR" --scan-mode "$AUDIT_SCAN_MODE" --scope-id "$AUDIT_SCOPE_ID" --max-files "$AUDIT_MAX_FILES" --large-file-mib "$AUDIT_LARGE_FILE_MIB" --github-output "$GITHUB_OUTPUT")
+        if [[ -z "$AUDIT_OUTPUT_DIR" ]]; then
+          AUDIT_OUTPUT_DIR="$(python -I -c 'import os, tempfile; print(tempfile.mkdtemp(prefix="audit-repo-", dir=os.environ["RUNNER_TEMP"]))')"
+        fi
+        args=("$AUDIT_PATH" --output-dir "$AUDIT_OUTPUT_DIR" --scan-mode "$AUDIT_SCAN_MODE" --max-files "$AUDIT_MAX_FILES" --large-file-mib "$AUDIT_LARGE_FILE_MIB" --github-output "$GITHUB_OUTPUT")
+        if [[ -n "$AUDIT_SCOPE_ID" ]]; then args+=(--scope-id "$AUDIT_SCOPE_ID"); fi
         if [[ -n "$AUDIT_BASELINE" ]]; then args+=(--baseline "$AUDIT_BASELINE"); fi
         if [[ "$AUDIT_FAIL_ON_ATTENTION" == "true" ]]; then args+=(--fail-on-attention); fi
         if [[ "$AUDIT_REQUIRE_COMPARABLE" == "true" ]]; then args+=(--require-comparable); fi
         while IFS= read -r value; do [[ -z "$value" ]] || args+=(--include-path "$value"); done <<< "$AUDIT_INCLUDE_PATHS"
         while IFS= read -r value; do [[ -z "$value" ]] || args+=(--exclude-path "$value"); done <<< "$AUDIT_EXCLUDE_PATHS"
         while IFS= read -r value; do [[ -z "$value" ]] || args+=(--exclude-dir "$value"); done <<< "$AUDIT_EXCLUDE_DIRS"
-        python "$GITHUB_ACTION_PATH/scripts/check_repo.py" "${args[@]}"
+        python -I "$GITHUB_ACTION_PATH/scripts/check_repo.py" "${args[@]}"

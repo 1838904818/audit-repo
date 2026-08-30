@@ -23,6 +23,221 @@ SPEC.loader.exec_module(MODULE)
 
 
 class CollectRepoSignalsTests(unittest.TestCase):
+    def test_git_resolution_ignores_current_directory_and_repo_path_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            fake_git = root / ("git.exe" if os.name == "nt" else "git")
+            shutil.copy2(sys.executable, fake_git)
+            if os.name != "nt":
+                fake_git.chmod(fake_git.stat().st_mode | 0o111)
+            original_path = os.environ.get("PATH", "")
+            poisoned_path = os.pathsep.join(("", ".", str(root), original_path))
+            previous_cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                with mock.patch.dict(os.environ, {"PATH": poisoned_path}, clear=False):
+                    resolved = MODULE.resolve_git_executable(root)
+            finally:
+                os.chdir(previous_cwd)
+
+            if resolved is None:
+                self.skipTest("trusted Git executable unavailable outside the test repository")
+            self.assertTrue(resolved.is_absolute())
+            self.assertNotEqual(resolved, fake_git.resolve())
+            self.assertFalse(MODULE.path_is_within(resolved, root))
+
+    def test_git_resolution_excludes_entire_containing_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repository = Path(temp_dir).resolve()
+            repository.joinpath(".git").mkdir()
+            target = repository / "packages" / "api"
+            target.mkdir(parents=True)
+            target.joinpath(".git").write_text("spoofed nested marker\n", encoding="utf-8")
+            tools = repository / "tools"
+            tools.mkdir()
+            fake_git = tools / ("git.exe" if os.name == "nt" else "git")
+            shutil.copy2(sys.executable, fake_git)
+            if os.name != "nt":
+                fake_git.chmod(fake_git.stat().st_mode | 0o111)
+            poisoned_path = os.pathsep.join((str(tools), os.environ.get("PATH", "")))
+
+            with mock.patch.dict(os.environ, {"PATH": poisoned_path}, clear=False):
+                resolved = MODULE.resolve_git_executable(target)
+
+            if resolved is None:
+                self.skipTest("trusted Git executable unavailable outside the test worktree")
+            self.assertEqual(MODULE.git_worktree_boundary(target), repository)
+            self.assertFalse(MODULE.path_is_within(resolved, repository))
+            self.assertNotEqual(resolved, fake_git.resolve())
+
+    def test_git_resolution_excludes_lexical_symlink_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, tempfile.TemporaryDirectory() as external_dir:
+            repository = Path(temp_dir).resolve()
+            repository.joinpath(".git").mkdir()
+            external = Path(external_dir).resolve()
+            scan_link = repository / "scan"
+            tools = repository / "tools"
+            tools.mkdir()
+            fake_git = tools / ("git.exe" if os.name == "nt" else "git")
+            shutil.copy2(sys.executable, fake_git)
+            if os.name != "nt":
+                fake_git.chmod(fake_git.stat().st_mode | 0o111)
+            try:
+                scan_link.symlink_to(external, target_is_directory=True)
+            except OSError as error:
+                self.skipTest(f"directory symlinks unavailable: {error}")
+            poisoned_path = os.pathsep.join((str(tools), os.environ.get("PATH", "")))
+
+            with mock.patch.dict(os.environ, {"PATH": poisoned_path}, clear=False):
+                resolved = MODULE.resolve_git_executable(
+                    scan_link.resolve(), git_untrusted_roots=(scan_link,),
+                )
+
+            if resolved is None:
+                self.skipTest("trusted Git executable unavailable outside the test worktree")
+            self.assertFalse(MODULE.path_is_within(resolved, repository))
+            self.assertNotEqual(resolved, fake_git.resolve())
+
+    def test_git_resolution_uses_filesystem_identity_for_case_variants(self) -> None:
+        test_parent = MODULE_PATH.resolve().parents[2]
+        with tempfile.TemporaryDirectory(dir=test_parent) as temp_dir:
+            root = Path(temp_dir).resolve()
+            repository = root / "CaseRepo"
+            repository.mkdir()
+            repository.joinpath(".git").mkdir()
+            tools = repository / "Tools"
+            tools.mkdir()
+            fake_git = tools / ("git.exe" if os.name == "nt" else "git")
+            shutil.copy2(sys.executable, fake_git)
+            if os.name != "nt":
+                fake_git.chmod(fake_git.stat().st_mode | 0o111)
+            variant_tools = root / "CASEREPO" / "TOOLS"
+            if not variant_tools.is_dir():
+                self.skipTest("test volume is case-sensitive")
+            if MODULE.git_worktree_boundary(repository) != repository:
+                self.skipTest("test repository is nested inside another worktree boundary")
+            poisoned_path = os.pathsep.join((str(variant_tools), os.environ.get("PATH", "")))
+
+            with mock.patch.dict(os.environ, {"PATH": poisoned_path}, clear=False):
+                resolved = MODULE.resolve_git_executable(repository)
+
+            if resolved is None:
+                self.skipTest("trusted Git executable unavailable outside the test repository")
+            self.assertTrue(MODULE.path_is_within(variant_tools.resolve() / fake_git.name, repository))
+            self.assertNotEqual(resolved, fake_git.resolve())
+
+    @unittest.skipUnless(os.name == "posix" and shutil.which("git"), "case-variant CLI test requires POSIX Git")
+    def test_collector_cli_never_executes_case_variant_worktree_git(self) -> None:
+        test_parent = MODULE_PATH.resolve().parents[2]
+        with tempfile.TemporaryDirectory(dir=test_parent) as temp_dir:
+            root = Path(temp_dir).resolve()
+            repository = root / "CaseRepo"
+            repository.mkdir()
+            trusted_git = Path(shutil.which("git") or "").resolve()
+            subprocess.run(
+                [str(trusted_git), "-C", str(repository), "init", "-q"],
+                check=True,
+                timeout=10,
+            )
+            repository.joinpath("README.md").write_text("# Example\n", encoding="utf-8")
+            subprocess.run(
+                [str(trusted_git), "-C", str(repository), "add", "README.md"],
+                check=True,
+                timeout=10,
+            )
+            tools = repository / "Tools"
+            tools.mkdir()
+            marker = repository / "fake-git-invoked"
+            fake_git = tools / "git"
+            fake_git.write_text(
+                "#!/bin/sh\n: > \"$AUDIT_REPO_FAKE_GIT_MARKER\"\nexit 0\n",
+                encoding="utf-8",
+            )
+            fake_git.chmod(fake_git.stat().st_mode | 0o111)
+            variant_tools = root / "CASEREPO" / "TOOLS"
+            if not variant_tools.is_dir():
+                self.skipTest("test volume is case-sensitive")
+            if MODULE.git_worktree_boundary(repository) != repository:
+                self.skipTest("test repository is nested inside another worktree boundary")
+            environment = os.environ.copy()
+            environment["PATH"] = os.pathsep.join((str(variant_tools), environment.get("PATH", "")))
+            environment["AUDIT_REPO_FAKE_GIT_MARKER"] = str(marker)
+
+            result = subprocess.run(
+                [sys.executable, str(MODULE_PATH), str(repository), "--scan-mode", "tracked"],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=environment,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(marker.exists())
+
+    @unittest.skipUnless(os.name == "posix" and shutil.which("git"), "Git symlink boundary test requires POSIX")
+    def test_collector_cli_never_executes_git_from_lexical_symlink_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, tempfile.TemporaryDirectory() as external_dir:
+            repository = Path(temp_dir).resolve()
+            repository.joinpath(".git").mkdir()
+            external = Path(external_dir).resolve()
+            scan_link = repository / "scan"
+            tools = repository / "tools"
+            tools.mkdir()
+            marker = repository / "fake-git-invoked"
+            fake_git = tools / "git"
+            fake_git.write_text(
+                "#!/bin/sh\n: > \"$AUDIT_REPO_FAKE_GIT_MARKER\"\nexit 0\n",
+                encoding="utf-8",
+            )
+            fake_git.chmod(fake_git.stat().st_mode | 0o111)
+            scan_link.symlink_to(external, target_is_directory=True)
+            environment = os.environ.copy()
+            environment["PATH"] = os.pathsep.join((str(tools), environment.get("PATH", "")))
+            environment["AUDIT_REPO_FAKE_GIT_MARKER"] = str(marker)
+
+            result = subprocess.run(
+                [sys.executable, str(MODULE_PATH), str(scan_link), "--scan-mode", "tracked"],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=environment,
+            )
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("requires a Git working tree", result.stderr)
+            self.assertFalse(marker.exists())
+
+    def test_git_commands_disable_repo_execution_and_optional_locks(self) -> None:
+        trusted_git = Path("C:/trusted/git.exe") if os.name == "nt" else Path("/trusted/git")
+        completed = subprocess.CompletedProcess([], 0, stdout=b"")
+        with mock.patch.object(MODULE, "resolve_git_executable", return_value=trusted_git), \
+                mock.patch.object(MODULE.subprocess, "run", return_value=completed) as run_mock:
+            self.assertEqual(MODULE.git_tracked_files(Path("/audit-target")), set())
+
+        command = run_mock.call_args.args[0]
+        environment = run_mock.call_args.kwargs["env"]
+        self.assertEqual(command[0], str(trusted_git))
+        self.assertIn(f"core.hooksPath={MODULE.DISABLED_GIT_HOOKS_PATH}", command)
+        self.assertIn("core.fsmonitor=false", command)
+        self.assertEqual(environment["GIT_OPTIONAL_LOCKS"], "0")
+        self.assertEqual(environment["GIT_TERMINAL_PROMPT"], "0")
+
+        with mock.patch.dict(os.environ, {"GIT_DIR": "attacker-controlled", "GIT_CONFIG_COUNT": "1"}):
+            sanitized = MODULE.git_environment()
+        self.assertNotIn("GIT_DIR", sanitized)
+        self.assertNotIn("GIT_CONFIG_COUNT", sanitized)
+        self.assertEqual(sanitized["GIT_PAGER"], "cat")
+
+    def test_git_metadata_never_runs_status(self) -> None:
+        root = Path("/audit-target")
+        with mock.patch.object(MODULE, "git_output", return_value="main") as git_output:
+            metadata = MODULE.git_metadata(root, {"README.md"})
+
+        self.assertEqual(metadata["working_tree"], "unknown")
+        git_output.assert_called_once_with(
+            root, "branch", "--show-current", git_untrusted_roots=(),
+        )
+
     def test_collects_expected_inventory_without_reading_secret_contents(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -70,10 +285,10 @@ class CollectRepoSignalsTests(unittest.TestCase):
             data = MODULE.collect(root, 100)
             rendered = MODULE.to_markdown(data)
 
-            self.assertEqual(data["tool_version"], "1.8.2")
-            self.assertEqual(data["scan_semantics_version"], 1)
-            self.assertIn("Collector version: `1.8.2`", rendered)
-            self.assertIn("Scan semantics version: 1", rendered)
+            self.assertEqual(data["tool_version"], "1.9.0")
+            self.assertEqual(data["scan_semantics_version"], 2)
+            self.assertIn("Collector version: `1.9.0`", rendered)
+            self.assertIn("Scan semantics version: 2", rendered)
             self.assertFalse(data["git_repository"])
             self.assertEqual(data["test_file_count"], 1)
             self.assertEqual(data["manifests"], ["package.json", "pyproject.toml"])
@@ -113,6 +328,97 @@ class CollectRepoSignalsTests(unittest.TestCase):
             self.assertNotIn("oauth-secret", serialized)
             self.assertNotIn("cargo-secret", serialized)
             self.assertNotIn("gh-secret", serialized)
+
+    def test_classifies_ci_tests_manifests_and_lockfiles_precisely(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            contents = {
+                ".github/workflows/ci.yml": (
+                    "steps:\n"
+                    "  - run: |\n"
+                    "      echo 'uses: fake/run-block@main'\n"
+                    "      uses: fake/indented-run-block@main\n"
+                    "  - run: >- # folded script\n"
+                    "      uses: fake/folded-block@main\n"
+                    "  - run: &shared |\n"
+                    "      uses: fake/anchored-block@main\n"
+                    "  - run: !!str &tagged >+\n"
+                    "      uses: fake/tagged-block@main\n"
+                    "  - uses: >-\n"
+                    "      slackapi/slack-github-action@v2\n"
+                    "  - uses: >-\n"
+                    "      fake/multiline\n"
+                    "      action@main\n"
+                    "  - name: |\n"
+                    "      Checkout source\n"
+                    "    uses: actions/checkout@v7\n"
+                    "  - uses: \"actions/setup-python@v5\"\n"
+                    "  - uses: 'github/codeql-action/init@v3' # quoted and commented\n"
+                    "  - uses : owner/action@v1 # space before colon\n"
+                    "  - \"uses\" : actions/cache@v4\n"
+                ),
+                ".github/workflows/deploy.yaml": "name: Deploy\n",
+                ".circleci/config.yml": "version: 2.1\n",
+                ".gitlab-ci.yml": "test: {}\n",
+                "azure-pipelines.yml": "steps: []\n",
+                "bitbucket-pipelines.yml": "pipelines: {}\n",
+                "Jenkinsfile": "pipeline {}\n",
+                ".github/workflows/README.md": "- uses: fake/readme@main\n",
+                ".github/workflows/ci.yml.disabled": "- uses: fake/disabled@main\n",
+                ".github/workflows/archive/old.yml": "- uses: fake/archive@main\n",
+                ".circleci/README.md": "- uses: fake/circle-readme@main\n",
+                ".circleci/jobs/build.yml": "- uses: fake/circle-job@main\n",
+                "docs/.github/workflows/ci.yml": "- uses: fake/docs@main\n",
+            }
+            test_files = ("tests.py", "app/tests.py", "CalculatorTests.cs", "Tests.cs")
+            non_test_files = (
+                "Tests.py", "Contests.cs", "Protests.cs", "Latest.cs", "WidgetTests.md",
+                "Tests.csproj", "tests.py.example",
+            )
+            manifests = (
+                "Pipfile", "Package.swift", "packages/api/App.csproj", "Core.fsproj",
+                "Tool.vbproj", "Repo.sln", "Repo.slnx", "Package@swift-5.swift",
+                "Package@swift-5.10.1.swift",
+            )
+            non_manifests = (
+                "App.csproj.user", "Repo.sln.bak", "Package.swift.example", "Pipfile.md", ".sln",
+                "pipfile", "package.swift", "App.CSPROJ", "Package@swift-5.10.1.2.swift",
+                "Package@swift-x.swift",
+            )
+            lockfiles = (
+                "Pipfile.lock", "Package.resolved", "packages.lock.json",
+                "packages.Widget.lock.json", "packages/My.App/packages.My.App.lock.json",
+                "bun.lock", "bun.lockb",
+            )
+            non_lockfiles = (
+                "packages.lock.json.bak", "packages..lock.json", "packages.Widget.lock.json.bak",
+                "PIPFILE.LOCK", "PACKAGE.RESOLVED", "bun.lock.old", "random.lock",
+            )
+            for relative, content in contents.items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+            for relative in (*test_files, *non_test_files, *manifests, *non_manifests, *lockfiles, *non_lockfiles):
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("", encoding="utf-8")
+
+            data = MODULE.collect(root, 200)
+
+            self.assertFalse(MODULE.is_ci_file(".github/workflows/CI.YML"))
+            self.assertEqual(data["ci_files"], sorted((
+                ".github/workflows/ci.yml", ".github/workflows/deploy.yaml", ".circleci/config.yml",
+                ".gitlab-ci.yml", "azure-pipelines.yml", "bitbucket-pipelines.yml", "Jenkinsfile",
+            )))
+            self.assertEqual(data["ci_action_references"], [
+                "actions/cache@v4", "actions/checkout@v7", "actions/setup-python@v5",
+                "github/codeql-action/init@v3", "owner/action@v1",
+                "slackapi/slack-github-action@v2",
+            ])
+            self.assertEqual(data["test_file_count"], len(test_files))
+            self.assertEqual(data["test_file_examples"], sorted(test_files))
+            self.assertEqual(data["manifests"], sorted((*manifests, "Tests.csproj")))
+            self.assertEqual(data["lockfiles"], sorted(lockfiles))
 
     def test_sensitive_path_patterns_and_environment_examples(self) -> None:
         sensitive = (
@@ -291,6 +597,33 @@ class CollectRepoSignalsTests(unittest.TestCase):
                 self.assertTrue(sensitive[".env.local"])
             self.assertEqual(visible["scan_incomplete_reasons"], [])
             self.assertEqual(tracked["scan_incomplete_reasons"], [])
+
+    @unittest.skipUnless(os.name == "posix" and shutil.which("git"), "Git fsmonitor test requires POSIX")
+    def test_git_collection_does_not_execute_repo_configured_fsmonitor(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            git_executable = MODULE.resolve_git_executable(root)
+            if git_executable is None:
+                self.skipTest("trusted Git executable unavailable")
+            subprocess.run([str(git_executable), "-C", str(root), "init", "-q"], check=True, timeout=10)
+            root.joinpath("README.md").write_text("# Example\n", encoding="utf-8")
+            subprocess.run([str(git_executable), "-C", str(root), "add", "README.md"], check=True, timeout=10)
+            fsmonitor = root / "malicious-fsmonitor"
+            fsmonitor.write_text(
+                "#!/bin/sh\n: > \"$PWD/fsmonitor-invoked\"\nprintf '\\n'\n",
+                encoding="utf-8",
+            )
+            fsmonitor.chmod(fsmonitor.stat().st_mode | 0o111)
+            subprocess.run(
+                [str(git_executable), "-C", str(root), "config", "core.fsmonitor", str(fsmonitor)],
+                check=True,
+                timeout=10,
+            )
+
+            data = MODULE.collect(root, 100, scan_mode="tracked")
+
+            self.assertTrue(data["git_repository"])
+            self.assertFalse((root / "fsmonitor-invoked").exists())
 
     @unittest.skipUnless(shutil.which("git"), "Git is required for scan-limit coverage")
     def test_git_limit_counts_only_files_after_path_filters(self) -> None:

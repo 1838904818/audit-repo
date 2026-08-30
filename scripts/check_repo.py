@@ -27,7 +27,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=Path("audit-repo-results"))
     parser.add_argument("--baseline", type=Path, help="Earlier collector JSON snapshot")
     parser.add_argument("--scan-mode", choices=("filesystem", "git-visible", "tracked"), default="tracked")
-    parser.add_argument("--scope-id", default="repository", help="Stable logical scope identifier")
+    parser.add_argument(
+        "--scope-id", help="Project-qualified logical scope ID for equivalent roots (unset by default)",
+    )
     parser.add_argument("--include-path", action="append", default=[], metavar="GLOB")
     parser.add_argument("--exclude-path", action="append", default=[], metavar="GLOB")
     parser.add_argument("--exclude-dir", action="append", default=[], metavar="NAME")
@@ -98,13 +100,60 @@ def clear_managed_outputs(paths: tuple[Path, ...]) -> bool:
     return success
 
 
+def absolute_without_symlink_resolution(path: Path) -> Path:
+    expanded = path.expanduser()
+    if expanded.drive and not expanded.is_absolute():
+        raise ValueError("drive-relative paths are not supported")
+    return expanded if expanded.is_absolute() else Path.cwd() / expanded
+
+
+def path_is_within(path: Path, directory: Path) -> bool:
+    try:
+        directory_stat = directory.stat()
+    except (OSError, ValueError):
+        directory_stat = None
+    if directory_stat is not None:
+        for candidate in (path, *path.parents):
+            try:
+                if os.path.samestat(candidate.stat(), directory_stat):
+                    return True
+            except (OSError, ValueError):
+                continue
+    try:
+        path.relative_to(directory)
+    except ValueError:
+        return False
+    return True
+
+
+def repository_output_symlink(repository: Path, output_candidate: Path) -> Path | None:
+    current = Path(output_candidate.anchor)
+    resolved_parent = current.resolve()
+    for part in output_candidate.parts[1:]:
+        parent_is_in_repository = path_is_within(resolved_parent, repository)
+        current /= part
+        if parent_is_in_repository and current.is_symlink():
+            return current
+        resolved_parent = current.resolve(strict=False)
+    return None
+
+
 def main() -> int:
     args = parse_args()
     try:
-        repository = Path(args.path).expanduser().resolve()
-        output_dir = args.output_dir.expanduser().resolve()
+        repository_candidate = absolute_without_symlink_resolution(Path(args.path))
+        repository = repository_candidate.resolve()
+        output_candidate = absolute_without_symlink_resolution(args.output_dir)
+        unsafe_output_component = repository_output_symlink(repository, output_candidate)
+        if unsafe_output_component is not None:
+            print(
+                "error: output directory must not traverse a symbolic link inside the repository",
+                file=sys.stderr,
+            )
+            return 2
+        output_dir = output_candidate.resolve()
         baseline = args.baseline.expanduser().resolve() if args.baseline else None
-    except (OSError, RuntimeError) as error:
+    except (OSError, RuntimeError, ValueError) as error:
         print(f"error: could not resolve an input path: {error}", file=sys.stderr)
         return 2
 
@@ -134,14 +183,16 @@ def main() -> int:
         return 2
 
     common = [
-        str(repository), "--scan-mode", args.scan_mode, "--scope-id", args.scope_id,
+        str(repository_candidate), "--scan-mode", args.scan_mode,
         "--max-files", str(args.max_files), "--large-file-mib", str(args.large_file_mib),
     ]
+    if args.scope_id is not None:
+        common.extend(("--scope-id", args.scope_id))
     append_values(common, "--include-path", args.include_path)
     append_values(common, "--exclude-path", args.exclude_path)
     append_values(common, "--exclude-dir", args.exclude_dir)
 
-    collect_json = [sys.executable, str(COLLECTOR), *common, "--format", "json", "--output", str(snapshot)]
+    collect_json = [sys.executable, "-I", str(COLLECTOR), *common, "--format", "json", "--output", str(snapshot)]
     status = run(collect_json)
     if status != 0:
         return status
@@ -157,7 +208,7 @@ def main() -> int:
     comparable = ""
     if baseline is not None:
         compare_json = [
-            sys.executable, str(COMPARER), str(baseline), str(snapshot),
+            sys.executable, "-I", str(COMPARER), str(baseline), str(snapshot),
             "--format", "json", "--output", str(comparison),
         ]
         status = run(compare_json)

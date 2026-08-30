@@ -51,9 +51,28 @@ jobs:
         run: python scripts/compare_repo_signals.py "${{ runner.temp }}/repo-signals.json" "${{ runner.temp }}/repo-signals.json" --format sarif --output "${{ runner.temp }}/repo-signals.sarif"
       - name: Exercise one-command audit
         run: python scripts/check_repo.py . --scan-mode tracked --scope-id ci-repository --output-dir "${{ runner.temp }}/audit-run"
-      - name: Exercise local GitHub Action
+      - name: Exercise local GitHub Action defaults
+        id: local_action
         uses: ./
         with:
           scan-mode: tracked
-          scope-id: ci-repository
-          output-dir: ${{ runner.temp }}/action-run
+      - name: Verify local Action default scope
+        shell: bash
+        env:
+          ACTION_SNAPSHOT: ${{ steps.local_action.outputs.snapshot }}
+          RUNNER_TEMP_PATH: ${{ runner.temp }}
+          WORKSPACE_PATH: ${{ github.workspace }}
+        run: python -c "import json, os, pathlib; snapshot=pathlib.Path(os.environ['ACTION_SNAPSHOT']).resolve(); assert json.load(snapshot.open(encoding='utf-8'))['scope_id'] is None; assert snapshot.is_relative_to(pathlib.Path(os.environ['RUNNER_TEMP_PATH']).resolve()); assert not snapshot.is_relative_to(pathlib.Path(os.environ['WORKSPACE_PATH']).resolve())"
+      - name: Exercise local GitHub Action explicit scope
+        id: local_action_scoped
+        uses: ./
+        with:
+          scan-mode: tracked
+          scope-id: ${{ github.repository }}:ci-scope
+          output-dir: ${{ runner.temp }}/action-run-scoped
+      - name: Verify local Action explicit scope
+        shell: bash
+        env:
+          ACTION_SNAPSHOT: ${{ steps.local_action_scoped.outputs.snapshot }}
+          EXPECTED_SCOPE: ${{ github.repository }}:ci-scope
+        run: python -c "import json, os; assert json.load(open(os.environ['ACTION_SNAPSHOT'], encoding='utf-8'))['scope_id'] == os.environ['EXPECTED_SCOPE']"

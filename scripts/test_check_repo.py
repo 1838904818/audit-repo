@@ -31,6 +31,7 @@ class CheckRepoTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             snapshot = json.loads(Path(output_dir, "snapshot.json").read_text(encoding="utf-8"))
             self.assertEqual(snapshot["file_count"], 1)
+            self.assertIsNone(snapshot["scope_id"])
             report = Path(output_dir, "report.md").read_text(encoding="utf-8")
             self.assertIn("# Repository signals", report)
             self.assertIn("Files scanned: 1", report)
@@ -54,9 +55,9 @@ class CheckRepoTests(unittest.TestCase):
             self.assertIn("attention-count=0\n", outputs)
             self.assertIn("comparable=true\n", outputs)
             self.assertIn("sarif=", outputs)
-            self.assertIn("tool-version=1.8.2\n", outputs)
-            self.assertIn("scan-semantics-version=1\n", outputs)
-            self.assertIn("tool_version=1.8.2\n", second.stdout)
+            self.assertIn("tool-version=1.9.0\n", outputs)
+            self.assertIn("scan-semantics-version=2\n", outputs)
+            self.assertIn("tool_version=1.9.0\n", second.stdout)
 
     def test_github_outputs_use_multiline_records_for_untrusted_newlines(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -198,6 +199,188 @@ class CheckRepoTests(unittest.TestCase):
             self.assertEqual(result.returncode, 2)
             self.assertIn("could not remove stale generated output", result.stderr)
             self.assertEqual(child.read_text(encoding="utf-8"), "preserve me\n")
+
+    def test_rejects_output_directory_symlink_inside_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as repository_dir, tempfile.TemporaryDirectory() as external_dir:
+            repository = Path(repository_dir)
+            repository.joinpath("README.md").write_text("# Example\n", encoding="utf-8")
+            external = Path(external_dir)
+            sentinel = external / "snapshot.json"
+            sentinel.write_text("preserve me\n", encoding="utf-8")
+            linked_output = repository / "audit-repo-results"
+            try:
+                linked_output.symlink_to(external, target_is_directory=True)
+            except OSError as error:
+                self.skipTest(f"directory symlinks unavailable: {error}")
+
+            result = self.run_check(
+                repository_dir, "--scan-mode", "filesystem", "--output-dir", str(linked_output),
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("must not traverse a symbolic link inside the repository", result.stderr)
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve me\n")
+
+    def test_rejects_repo_output_symlink_through_repository_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repository = root / "repository"
+            repository.mkdir()
+            repository.joinpath("README.md").write_text("# Example\n", encoding="utf-8")
+            external = root / "external"
+            external.mkdir()
+            sentinel = external / "snapshot.json"
+            sentinel.write_text("preserve me\n", encoding="utf-8")
+            linked_output = repository / "results"
+            repository_alias = root / "repository-alias"
+            try:
+                linked_output.symlink_to(external, target_is_directory=True)
+                repository_alias.symlink_to(repository, target_is_directory=True)
+            except OSError as error:
+                self.skipTest(f"directory symlinks unavailable: {error}")
+
+            result = self.run_check(
+                str(repository_alias), "--scan-mode", "filesystem",
+                "--output-dir", str(repository_alias / "results"),
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("must not traverse a symbolic link inside the repository", result.stderr)
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve me\n")
+
+    def test_rejects_repo_output_symlink_through_different_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repository = root / "repository"
+            repository.mkdir()
+            repository.joinpath("README.md").write_text("# Example\n", encoding="utf-8")
+            external = root / "external"
+            external.mkdir()
+            sentinel = external / "snapshot.json"
+            sentinel.write_text("preserve me\n", encoding="utf-8")
+            linked_output = repository / "results"
+            other_alias = root / "other-repository-alias"
+            try:
+                linked_output.symlink_to(external, target_is_directory=True)
+                other_alias.symlink_to(repository, target_is_directory=True)
+            except OSError as error:
+                self.skipTest(f"directory symlinks unavailable: {error}")
+
+            result = self.run_check(
+                str(repository), "--scan-mode", "filesystem",
+                "--output-dir", str(other_alias / "results"),
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("must not traverse a symbolic link inside the repository", result.stderr)
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve me\n")
+
+    def test_rejects_repo_output_symlink_through_case_variant(self) -> None:
+        test_parent = SCRIPT.resolve().parents[2]
+        with tempfile.TemporaryDirectory(dir=test_parent) as temp_dir:
+            root = Path(temp_dir).resolve()
+            repository = root / "CaseRepo"
+            repository.mkdir()
+            repository.joinpath("README.md").write_text("# Example\n", encoding="utf-8")
+            external = root / "external"
+            external.mkdir()
+            sentinel = external / "snapshot.json"
+            sentinel.write_text("preserve me\n", encoding="utf-8")
+            linked_output = repository / "OutputLink"
+            try:
+                linked_output.symlink_to(external, target_is_directory=True)
+            except OSError as error:
+                self.skipTest(f"directory symlinks unavailable: {error}")
+            variant_output = root / "CASEREPO" / "OUTPUTLINK"
+            if not variant_output.is_symlink():
+                self.skipTest("test volume is case-sensitive")
+
+            result = self.run_check(
+                str(repository), "--scan-mode", "filesystem", "--output-dir", str(variant_output),
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("must not traverse a symbolic link inside the repository", result.stderr)
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve me\n")
+
+    def test_preserves_parent_segments_after_repository_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repository = root / "repository"
+            subdirectory = repository / "subdirectory"
+            subdirectory.mkdir(parents=True)
+            repository.joinpath("README.md").write_text("# Example\n", encoding="utf-8")
+            alias = root / "subdirectory-alias"
+            try:
+                alias.symlink_to(subdirectory, target_is_directory=True)
+            except OSError as error:
+                self.skipTest(f"directory symlinks unavailable: {error}")
+
+            requested_output = alias / ".." / "results"
+            result = self.run_check(
+                str(repository), "--scan-mode", "filesystem", "--output-dir", str(requested_output),
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((repository / "results" / "snapshot.json").is_file())
+            self.assertFalse((root / "results").exists())
+
+    @unittest.skipUnless(os.name == "posix", "Git symlink boundary test requires POSIX")
+    def test_runner_never_executes_git_from_lexical_symlink_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, tempfile.TemporaryDirectory() as external_dir, \
+                tempfile.TemporaryDirectory() as output_dir:
+            repository = Path(temp_dir).resolve()
+            repository.joinpath(".git").mkdir()
+            external = Path(external_dir).resolve()
+            scan_link = repository / "scan"
+            tools = repository / "tools"
+            tools.mkdir()
+            marker = repository / "fake-git-invoked"
+            fake_git = tools / "git"
+            fake_git.write_text(
+                "#!/bin/sh\n: > \"$AUDIT_REPO_FAKE_GIT_MARKER\"\nexit 0\n",
+                encoding="utf-8",
+            )
+            fake_git.chmod(fake_git.stat().st_mode | 0o111)
+            scan_link.symlink_to(external, target_is_directory=True)
+            environment = os.environ.copy()
+            environment["PATH"] = os.pathsep.join((str(tools), environment.get("PATH", "")))
+            environment["AUDIT_REPO_FAKE_GIT_MARKER"] = str(marker)
+
+            result = subprocess.run(
+                [
+                    sys.executable, str(SCRIPT), str(scan_link), "--scan-mode", "tracked",
+                    "--output-dir", output_dir,
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=environment,
+            )
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("requires a Git working tree", result.stderr)
+            self.assertFalse(marker.exists())
+
+    def test_default_scope_does_not_authorize_cross_root_comparison(self) -> None:
+        with tempfile.TemporaryDirectory() as first_repository, tempfile.TemporaryDirectory() as second_repository, \
+                tempfile.TemporaryDirectory() as baseline_dir, tempfile.TemporaryDirectory() as output_dir:
+            Path(first_repository, "README.md").write_text("# First\n", encoding="utf-8")
+            Path(second_repository, "README.md").write_text("# Second\n", encoding="utf-8")
+            first = self.run_check(
+                first_repository, "--scan-mode", "filesystem", "--output-dir", baseline_dir,
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+
+            second = self.run_check(
+                second_repository, "--scan-mode", "filesystem", "--output-dir", output_dir,
+                "--baseline", str(Path(baseline_dir, "snapshot.json")), "--require-comparable",
+            )
+
+            self.assertEqual(second.returncode, 1, second.stderr)
+            comparison = json.loads(Path(output_dir, "comparison.json").read_text(encoding="utf-8"))
+            self.assertFalse(comparison["summary"]["comparable"])
+            self.assertTrue(any("roots differ" in item for item in comparison["limitations"]))
 
 
 if __name__ == "__main__":
