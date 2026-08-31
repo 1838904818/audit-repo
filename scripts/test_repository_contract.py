@@ -172,7 +172,8 @@ class RepositoryContractTests(unittest.TestCase):
         visible_lines: list[str] = []
         block_scalar_indent: int | None = None
         block_scalar = re.compile(
-            r'^\s*(?:-\s+)?[A-Za-z0-9_.-]+:\s*[>|]'
+            r'^\s*(?:-\s+)?[A-Za-z0-9_.-]+:\s*'
+            r'(?:(?:&[^\s\[\]{},]+|!<[^>\r\n]+>|![^\s\[\]{},]+)\s+)*[>|]'
             r'(?:[1-9][+-]?|[+-][1-9]?)?\s*$'
         )
         for raw_line in workflow.splitlines():
@@ -187,6 +188,18 @@ class RepositoryContractTests(unittest.TestCase):
             if block_scalar.fullmatch(line):
                 block_scalar_indent = indentation
         policy_surface = "\n".join(visible_lines)
+        node_property = r"(?:&[^\s\[\]{},]+|!<[^>\r\n]+>|![^\s\[\]{},]+)"
+        obscured_mapping_key = re.compile(
+            r"(?m)(?:^\s*(?:-\s+)?|[,{]\s*)"
+            r"(?:\*[^\s\[\]{},:]+\s*:|(?:"
+            + node_property
+            + r"\s+)+(?:uses|[\"'][^\"']+[\"']|\*[^\s\[\]{},:]+)\s*:)"
+        )
+        self.assertNotRegex(
+            policy_surface,
+            obscured_mapping_key,
+            f"workflow mapping keys cannot obscure dependencies with YAML node properties or aliases in {source}",
+        )
         self.assertNotRegex(
             policy_surface,
             r'''(?m)(?:^\s*(?:-\s+)?|[,{]\s*)["'][^"']+["']\s*:''',
@@ -237,20 +250,33 @@ class RepositoryContractTests(unittest.TestCase):
         pinned_sha = "1" * 40
         valid = f"""\
 jobs:
-  local:
+  local: &base_job
+    env: &env_vars
+      SAFE_VALUE: safe
+    strategy:
+      matrix:
+        python: [&python "3.10", *python]
     steps:
       - uses: ./
       - name: Named external step
         uses: actions/checkout@{pinned_sha} # pinned
+        env: *env_vars
       - name: A run block can contain uses text without declaring an action
         run: |
           uses: example/inside-script@main
+      - name: An anchored block scalar can contain uses text too
+        run: &script |
+          uses: example/inside-anchored-script@main
+      - name: A verbatim-tagged block scalar can contain uses text too
+        run: !<tag:yaml.org,2002:str> |2-
+          uses: example/inside-tagged-script@main
       - name: "A quoted scalar can contain uses: without declaring an action"
         run: echo safe
       - name: 'A single-quoted scalar can contain uses: too'
         run: echo safe
       - name: "hash#inside uses: remains a scalar"
         run: echo safe
+  local_copy: *base_job
   reusable:
     uses: owner/project/.github/workflows/reusable.yml@{pinned_sha}
 """
@@ -331,6 +357,40 @@ jobs:
             (
                 "explicit uses key",
                 valid + "\n  explicit:\n    ? uses\n    : owner/project@main\n",
+            ),
+            (
+                "anchor before uses key",
+                valid
+                + "\n  anchor_key:\n    steps:\n"
+                + "      - &dependency uses: owner/project@main\n",
+            ),
+            (
+                "alias used as uses key",
+                valid
+                + "\n  alias_key:\n    env:\n      KEY: &dependency uses\n    steps:\n"
+                + "      - *dependency: owner/project@main\n",
+            ),
+            (
+                "tagged uses key",
+                valid + "\n  tagged_key:\n    steps:\n      - !!str uses: owner/project@main\n",
+            ),
+            (
+                "verbatim-tagged uses key",
+                valid
+                + "\n  verbatim_tagged_key:\n    steps:\n"
+                + "      - !<tag:yaml.org,2002:str> uses: owner/project@main\n",
+            ),
+            (
+                "anchor before quoted uses key",
+                valid
+                + "\n  anchor_quoted_key:\n    steps:\n"
+                + '      - &dependency "uses": owner/project@main\n',
+            ),
+            (
+                "anchor and tag before uses key",
+                valid
+                + "\n  anchor_tagged_key:\n    steps:\n"
+                + "      - &dependency !!str uses: owner/project@main\n",
             ),
         ):
             with self.subTest(label=label):

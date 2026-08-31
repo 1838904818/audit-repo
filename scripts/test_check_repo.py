@@ -102,9 +102,9 @@ class CheckRepoTests(unittest.TestCase):
             self.assertIn("attention-count=0\n", outputs)
             self.assertIn("comparable=true\n", outputs)
             self.assertIn("sarif=", outputs)
-            self.assertIn("tool-version=1.10.5\n", outputs)
+            self.assertIn("tool-version=1.10.6\n", outputs)
             self.assertIn("scan-semantics-version=3\n", outputs)
-            self.assertIn("tool_version=1.10.5\n", second.stdout)
+            self.assertIn("tool_version=1.10.6\n", second.stdout)
 
     def test_comparison_gates_require_baseline_before_output_cleanup(self) -> None:
         gate_combinations = (

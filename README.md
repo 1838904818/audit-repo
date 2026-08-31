@@ -173,7 +173,7 @@ Run `python scripts/collect_repo_signals.py --help` or `python scripts/compare_r
 Use the repository directly as a composite Action. Pin a release tag or commit SHA in production workflows:
 
 ```yaml
-- uses: 1838904818/audit-repo@v1.10.5
+- uses: 1838904818/audit-repo@v1.10.6
   id: audit
   with:
     scan-mode: tracked
@@ -196,7 +196,7 @@ For a checked-in baseline, enable both policy gates:
       exit 2
     }
 
-- uses: 1838904818/audit-repo@v1.10.5
+- uses: 1838904818/audit-repo@v1.10.6
   with:
     baseline: .github/audit-baseline.json
     baseline-sha256: ${{ vars.AUDIT_BASELINE_SHA256 }}
@@ -270,7 +270,7 @@ python -m unittest discover -s scripts -p "test_*.py"
 Build the same deterministic assets used by GitHub Releases:
 
 ```bash
-python scripts/package_skill.py --version v1.10.5 --output-dir dist
+python scripts/package_skill.py --version v1.10.6 --output-dir dist
 ```
 
 The requested package version must match `TOOL_VERSION` in `scripts/collect_repo_signals.py`.

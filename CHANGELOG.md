@@ -2,6 +2,15 @@
 
 All notable changes to `audit-repo` are documented here. The project follows semantic versioning.
 
+## [1.10.6] - 2026-08-31
+
+### Security
+
+- Close workflow pin-contract bypasses where YAML anchors, aliases, or tags make a mapping key parse as `uses` without exposing a canonical textual `uses:` key. Dependency keys using YAML node properties or aliases now fail closed at collection-node boundaries.
+- Recognize anchors and tags on block-scalar values so script or description text inside those scalars remains outside the dependency-key policy surface.
+
+Snapshot schema 1 and scan semantics 3 are unchanged. Existing snapshots remain comparable when their scan settings and logical scopes match.
+
 ## [1.10.5] - 2026-08-31
 
 ### Changed
@@ -283,6 +292,7 @@ Because file classification changed, snapshots created before v1.9.0 have a diff
 
 - First stable release of the Codex Skill, repository signal collector, snapshot comparer, tests, and CI.
 
+[1.10.6]: https://github.com/1838904818/audit-repo/compare/v1.10.5...v1.10.6
 [1.10.5]: https://github.com/1838904818/audit-repo/compare/v1.10.4...v1.10.5
 [1.10.4]: https://github.com/1838904818/audit-repo/compare/v1.10.3...v1.10.4
 [1.10.3]: https://github.com/1838904818/audit-repo/compare/v1.10.2...v1.10.3
