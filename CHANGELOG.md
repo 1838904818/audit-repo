@@ -2,6 +2,15 @@
 
 All notable changes to `audit-repo` are documented here. The project follows semantic versioning.
 
+## [1.10.5] - 2026-08-31
+
+### Changed
+
+- Accept both LF and CRLF separators in the Action's multiline `include-paths`, `exclude-paths`, and `exclude-dirs` inputs. Only the trailing CR from a CRLF line ending is removed; embedded control characters remain invalid.
+- Strengthen the repository contract so every workflow `uses:` entry is checked, including named steps and reusable workflows, and every external reference must use a full 40-character commit SHA.
+
+Snapshot schema 1 and scan semantics 3 are unchanged. Existing snapshots remain comparable when their scan settings and logical scopes match.
+
 ## [1.10.4] - 2026-08-31
 
 ### Security
@@ -274,6 +283,7 @@ Because file classification changed, snapshots created before v1.9.0 have a diff
 
 - First stable release of the Codex Skill, repository signal collector, snapshot comparer, tests, and CI.
 
+[1.10.5]: https://github.com/1838904818/audit-repo/compare/v1.10.4...v1.10.5
 [1.10.4]: https://github.com/1838904818/audit-repo/compare/v1.10.3...v1.10.4
 [1.10.3]: https://github.com/1838904818/audit-repo/compare/v1.10.2...v1.10.3
 [1.10.2]: https://github.com/1838904818/audit-repo/compare/v1.10.1...v1.10.2

@@ -106,10 +106,236 @@ class RepositoryContractTests(unittest.TestCase):
     def test_actions_are_pinned_to_commit_shas(self) -> None:
         for relative in (".github/workflows/ci.yml", ".github/workflows/release.yml"):
             workflow = (ROOT / relative).read_text(encoding="utf-8")
-            action_refs = re.findall(r"(?m)^\s*- uses:\s+([^\s#]+)", workflow)
-            self.assertTrue(action_refs, f"no action references found in {relative}")
-            for action_ref in action_refs:
-                self.assertRegex(action_ref, r"^[^@]+@[0-9a-f]{40}$")
+            self.assert_pinned_workflow_references(workflow, relative)
+
+    def assert_pinned_workflow_references(self, workflow: str, source: str) -> None:
+        def strip_yaml_comment(raw_line: str) -> str:
+            single_quoted = False
+            double_quoted = False
+            escaped = False
+            index = 0
+            while index < len(raw_line):
+                character = raw_line[index]
+                if double_quoted:
+                    if escaped:
+                        escaped = False
+                    elif character == "\\":
+                        escaped = True
+                    elif character == '"':
+                        double_quoted = False
+                elif single_quoted:
+                    if character == "'" and index + 1 < len(raw_line) and raw_line[index + 1] == "'":
+                        index += 1
+                    elif character == "'":
+                        single_quoted = False
+                elif character == '"':
+                    double_quoted = True
+                elif character == "'":
+                    single_quoted = True
+                elif character == "#" and (index == 0 or raw_line[index - 1].isspace()):
+                    return raw_line[:index].rstrip()
+                index += 1
+            return raw_line.rstrip()
+
+        def mask_yaml_quoted_scalars(line: str) -> str:
+            masked = list(line)
+            single_quoted = False
+            double_quoted = False
+            escaped = False
+            index = 0
+            while index < len(line):
+                character = line[index]
+                if double_quoted:
+                    masked[index] = " "
+                    if escaped:
+                        escaped = False
+                    elif character == "\\":
+                        escaped = True
+                    elif character == '"':
+                        double_quoted = False
+                elif single_quoted:
+                    masked[index] = " "
+                    if character == "'" and index + 1 < len(line) and line[index + 1] == "'":
+                        masked[index + 1] = " "
+                        index += 1
+                    elif character == "'":
+                        single_quoted = False
+                elif character == '"':
+                    masked[index] = " "
+                    double_quoted = True
+                elif character == "'":
+                    masked[index] = " "
+                    single_quoted = True
+                index += 1
+            return "".join(masked)
+
+        visible_lines: list[str] = []
+        block_scalar_indent: int | None = None
+        block_scalar = re.compile(
+            r'^\s*(?:-\s+)?[A-Za-z0-9_.-]+:\s*[>|]'
+            r'(?:[1-9][+-]?|[+-][1-9]?)?\s*$'
+        )
+        for raw_line in workflow.splitlines():
+            stripped = raw_line.lstrip(" ")
+            indentation = len(raw_line) - len(stripped)
+            if block_scalar_indent is not None:
+                if not stripped or indentation > block_scalar_indent:
+                    continue
+                block_scalar_indent = None
+            line = strip_yaml_comment(raw_line)
+            visible_lines.append(line)
+            if block_scalar.fullmatch(line):
+                block_scalar_indent = indentation
+        policy_surface = "\n".join(visible_lines)
+        self.assertNotRegex(
+            policy_surface,
+            r'''(?m)(?:^\s*(?:-\s+)?|[,{]\s*)["'][^"']+["']\s*:''',
+            f"quoted workflow mapping keys are not allowed in {source}",
+        )
+        self.assertNotRegex(
+            policy_surface,
+            r"(?m)^\s*(?:-\s+)?\?\s+",
+            f"explicit workflow mapping keys are not allowed in {source}",
+        )
+
+        uses_values = re.findall(
+            r"(?m)^(?:    uses:|      - uses:|        uses:)\s*(.*?)\s*$",
+            policy_surface,
+        )
+        self.assertTrue(uses_values, f"no action references found in {source}")
+        unquoted_policy_surface = "\n".join(
+            mask_yaml_quoted_scalars(line) for line in visible_lines
+        )
+        uses_key_count = len(
+            re.findall(
+                r"(?m)(?:^\s*(?:-\s+)?|[,{]\s*)uses\s*:",
+                unquoted_policy_surface,
+            )
+        )
+        self.assertEqual(
+            len(uses_values),
+            uses_key_count,
+            f"non-canonical or flow-style uses key in {source}",
+        )
+        for value in uses_values:
+            canonical = re.fullmatch(r"([^\s#]+)(?:\s+#.*)?", value)
+            self.assertIsNotNone(
+                canonical,
+                f"uses reference must be one unquoted token in {source}: {value!r}",
+            )
+            action_ref = canonical.group(1) if canonical else ""
+            if action_ref == "./":
+                continue
+            self.assertRegex(
+                action_ref,
+                r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"
+                r"(?:/[A-Za-z0-9_.-]+)*@[0-9a-f]{40}$",
+                f"external action or reusable workflow is not pinned in {source}: {action_ref}",
+            )
+
+    def test_action_pin_contract_covers_named_steps_and_reusable_workflows(self) -> None:
+        pinned_sha = "1" * 40
+        valid = f"""\
+jobs:
+  local:
+    steps:
+      - uses: ./
+      - name: Named external step
+        uses: actions/checkout@{pinned_sha} # pinned
+      - name: A run block can contain uses text without declaring an action
+        run: |
+          uses: example/inside-script@main
+      - name: "A quoted scalar can contain uses: without declaring an action"
+        run: echo safe
+      - name: 'A single-quoted scalar can contain uses: too'
+        run: echo safe
+      - name: "hash#inside uses: remains a scalar"
+        run: echo safe
+  reusable:
+    uses: owner/project/.github/workflows/reusable.yml@{pinned_sha}
+"""
+        self.assert_pinned_workflow_references(valid, "valid fixture")
+
+        for label, floating in (
+            ("named step", valid.replace(f"actions/checkout@{pinned_sha}", "actions/checkout@main")),
+            (
+                "reusable workflow",
+                valid.replace(
+                    f"owner/project/.github/workflows/reusable.yml@{pinned_sha}",
+                    "owner/project/.github/workflows/reusable.yml@v1",
+                ),
+            ),
+            (
+                "Docker URI",
+                valid.replace(f"actions/checkout@{pinned_sha}", f"docker://image@{pinned_sha}"),
+            ),
+            (
+                "expression",
+                valid.replace(f"actions/checkout@{pinned_sha}", "${{ inputs.action }}"),
+            ),
+            (
+                "short SHA",
+                valid.replace(f"actions/checkout@{pinned_sha}", f"actions/checkout@{pinned_sha[:-1]}"),
+            ),
+            (
+                "long SHA",
+                valid.replace(f"actions/checkout@{pinned_sha}", f"actions/checkout@{pinned_sha}1"),
+            ),
+            (
+                "quoted reference",
+                valid.replace(
+                    f"actions/checkout@{pinned_sha}",
+                    f'"actions/checkout@{pinned_sha}"',
+                ),
+            ),
+            (
+                "local subaction",
+                valid.replace("uses: ./", "uses: ./.github/actions/local"),
+            ),
+            (
+                "flow-style step",
+                valid.replace(
+                    f"- name: Named external step\n"
+                    f"        uses: actions/checkout@{pinned_sha} # pinned",
+                    "- { uses: actions/checkout@main }",
+                ),
+            ),
+            (
+                "flow-style reusable workflow",
+                valid + "\n  flow_reusable: { uses: owner/project/.github/workflows/reusable.yml@main }\n",
+            ),
+            (
+                "non-canonical indentation",
+                valid + "\n    alternate:\n        uses: owner/project@main\n",
+            ),
+            (
+                "quoted uses key",
+                valid + '\n  quoted:\n    "uses": owner/project@main\n',
+            ),
+            (
+                "flow-style step after hash in double-quoted value",
+                valid
+                + '\n  hash_double:\n    steps:\n'
+                + '      - { name: "hash#inside", uses: owner/project@main }\n',
+            ),
+            (
+                "flow-style step after hash in single-quoted value",
+                valid
+                + "\n  hash_single:\n    steps:\n"
+                + "      - { name: 'hash#inside', uses: owner/project@main }\n",
+            ),
+            (
+                "escaped quoted uses key",
+                valid + '\n  escaped:\n    "u\\u0073es": owner/project@main\n',
+            ),
+            (
+                "explicit uses key",
+                valid + "\n  explicit:\n    ? uses\n    : owner/project@main\n",
+            ),
+        ):
+            with self.subTest(label=label):
+                with self.assertRaises(AssertionError):
+                    self.assert_pinned_workflow_references(floating, label)
 
     def test_composite_action_exposes_expected_contract(self) -> None:
         action = (ROOT / "action.yml").read_text(encoding="utf-8")
@@ -124,6 +350,13 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertRegex(action, r'(?ms)^  scope-id:\s*\n.*?^    default: ""\s*$')
         self.assertRegex(action, r'(?ms)^  output-dir:\s*\n.*?^    default: ""\s*$')
         self.assertRegex(action, r'(?ms)^  baseline-sha256:\s*\n.*?^    default: ""\s*$')
+        for input_name in ("include-paths", "exclude-paths", "exclude-dirs"):
+            self.assertRegex(
+                action,
+                rf'(?ms)^  {input_name}:\s*\n'
+                r'    description: LF- or CRLF-separated .*?\n'
+                r'    default: ""\s*$',
+            )
         self.assertIn('if [[ -n "$AUDIT_SCOPE_ID" ]]', action)
         self.assertIn('args+=("--temporary-output-parent=$RUNNER_TEMP")', action)
         self.assertNotIn("tempfile.mkdtemp", action)
@@ -137,6 +370,29 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("baseline-sha256 must be exactly 64 hexadecimal characters", action)
         self.assertIn('args+=("--baseline-sha256=$AUDIT_BASELINE_SHA256")', action)
         self.assertIn('args+=(-- "$AUDIT_PATH")', action)
+        multiline_loops = {
+            variable: body
+            for body, variable in re.findall(
+                r'(?ms)^        while IFS= read -r value; do\n'
+                r'(.*?)^        done <<< "\$(AUDIT_(?:INCLUDE_PATHS|EXCLUDE_PATHS|EXCLUDE_DIRS))"$',
+                action,
+            )
+        }
+        self.assertEqual(
+            set(multiline_loops),
+            {"AUDIT_INCLUDE_PATHS", "AUDIT_EXCLUDE_PATHS", "AUDIT_EXCLUDE_DIRS"},
+        )
+        for variable, option in (
+            ("AUDIT_INCLUDE_PATHS", "include-path"),
+            ("AUDIT_EXCLUDE_PATHS", "exclude-path"),
+            ("AUDIT_EXCLUDE_DIRS", "exclude-dir"),
+        ):
+            body = multiline_loops[variable]
+            normalize = "value=\"${value%$'\\r'}\""
+            append = f'args+=("--{option}=$value")'
+            self.assertEqual(body.count(normalize), 1)
+            self.assertEqual(body.count(append), 1)
+            self.assertLess(body.index(normalize), body.index(append))
         self.assertNotRegex(action, r'(?m)^\s*args=\([^\n]*--scope-id')
         self.assertIn('baseline_bytes = comparer.read_snapshot_file_bytes(path)', runner)
         self.assertIn('hashlib.sha256(baseline_bytes).hexdigest()', runner)
@@ -256,6 +512,7 @@ class RepositoryContractTests(unittest.TestCase):
             "non_git_tracked_explicit", "invalid_max_files_default",
             "invalid_exclude_dirs_default", "missing_root_default", "invalid_boolean",
             "managed_output_collision",
+            "embedded_cr_input",
         )
         for step_id in expected_failure_steps:
             self.assertEqual(ci.count(f"id: {step_id}\n"), 1)
@@ -301,6 +558,27 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn('assert [name for name, _ in top_level_pairs].count("root") == 2', ci)
         self.assertIn("hashlib.sha256(ambiguous_bytes).hexdigest()", ci)
         self.assertIn('default_parent.joinpath("duplicate-key-before.json")', ci)
+        self.assertEqual(ci.count("id: crlf_inputs\n"), 1)
+        self.assertIn(r'''fromJSON('"*\r\nREADME.md"')''', ci)
+        self.assertIn(r'''fromJSON('"excluded/**\r\ntemp/**"')''', ci)
+        self.assertIn(r'''fromJSON('"cache-extra\r\nfixtures-large"')''', ci)
+        self.assertIn(
+            'assert os.environ["CRLF_INCLUDE_PATHS"].encode() == b"*\\r\\nREADME.md"',
+            ci,
+        )
+        self.assertIn('snapshot["include_path_patterns"] == ["*", "README.md"]', ci)
+        self.assertIn(
+            'snapshot["exclude_path_patterns"] == ["excluded/**", "temp/**"]',
+            ci,
+        )
+        self.assertIn(
+            'snapshot["excluded_directory_names"] == ["cache-extra", "fixtures-large"]',
+            ci,
+        )
+        self.assertIn(r'''fromJSON('"safe\rinside/**"')''', ci)
+        self.assertIn("steps.embedded_cr_input.outcome", ci)
+        self.assertIn("toJSON(steps.embedded_cr_input.outputs)", ci)
+        self.assertIn('assert not Path(os.environ["OUTPUT_DIR"]).exists()', ci)
 
         def action_step(step_id: str) -> str:
             match = re.search(
@@ -310,6 +588,31 @@ class RepositoryContractTests(unittest.TestCase):
             )
             self.assertIsNotNone(match, f"missing Action step block: {step_id}")
             return match.group(0) if match else ""
+
+        crlf_action = action_step("crlf_inputs")
+        for input_name, json_text in (
+            ("include-paths", r'''"*\r\nREADME.md"'''),
+            ("exclude-paths", r'''"excluded/**\r\ntemp/**"'''),
+            ("exclude-dirs", r'''"cache-extra\r\nfixtures-large"'''),
+        ):
+            expected_line = (
+                f"          {input_name}: "
+                + "$"
+                + "{{"
+                + f" fromJSON('{json_text}') "
+                + "}}"
+            )
+            self.assertEqual(crlf_action.count(expected_line), 1)
+
+        embedded_cr_action = action_step("embedded_cr_input")
+        embedded_cr_line = (
+            "          include-paths: "
+            + "$"
+            + "{{"
+            + r''' fromJSON('"safe\rinside/**"') '''
+            + "}}"
+        )
+        self.assertEqual(embedded_cr_action.count(embedded_cr_line), 1)
 
         duplicate_explicit = action_step("duplicate_root_explicit")
         duplicate_default = action_step("duplicate_root_default")

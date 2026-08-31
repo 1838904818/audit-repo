@@ -20,13 +20,13 @@ inputs:
     description: Optional 1-200 character project-qualified logical scope ID without control characters.
     default: ""
   include-paths:
-    description: Newline-separated non-empty root-relative POSIX include globs without parent traversal.
+    description: LF- or CRLF-separated non-empty root-relative POSIX include globs without parent traversal.
     default: ""
   exclude-paths:
-    description: Newline-separated non-empty root-relative POSIX exclude globs without parent traversal.
+    description: LF- or CRLF-separated non-empty root-relative POSIX exclude globs without parent traversal.
     default: ""
   exclude-dirs:
-    description: Newline-separated non-empty single directory names without path separators, dot segments, or control characters.
+    description: LF- or CRLF-separated non-empty single directory names without path separators, dot segments, or control characters.
     default: ""
   max-files:
     description: Positive integer maximum selected files before the scan is marked truncated.
@@ -122,8 +122,17 @@ runs:
         if [[ -n "$AUDIT_BASELINE_SHA256" ]]; then args+=("--baseline-sha256=$AUDIT_BASELINE_SHA256"); fi
         if [[ "$AUDIT_FAIL_ON_ATTENTION" == "true" ]]; then args+=(--fail-on-attention); fi
         if [[ "$AUDIT_REQUIRE_COMPARABLE" == "true" ]]; then args+=(--require-comparable); fi
-        while IFS= read -r value; do [[ -z "$value" ]] || args+=("--include-path=$value"); done <<< "$AUDIT_INCLUDE_PATHS"
-        while IFS= read -r value; do [[ -z "$value" ]] || args+=("--exclude-path=$value"); done <<< "$AUDIT_EXCLUDE_PATHS"
-        while IFS= read -r value; do [[ -z "$value" ]] || args+=("--exclude-dir=$value"); done <<< "$AUDIT_EXCLUDE_DIRS"
+        while IFS= read -r value; do
+          value="${value%$'\r'}"
+          [[ -z "$value" ]] || args+=("--include-path=$value")
+        done <<< "$AUDIT_INCLUDE_PATHS"
+        while IFS= read -r value; do
+          value="${value%$'\r'}"
+          [[ -z "$value" ]] || args+=("--exclude-path=$value")
+        done <<< "$AUDIT_EXCLUDE_PATHS"
+        while IFS= read -r value; do
+          value="${value%$'\r'}"
+          [[ -z "$value" ]] || args+=("--exclude-dir=$value")
+        done <<< "$AUDIT_EXCLUDE_DIRS"
         args+=(-- "$AUDIT_PATH")
         python -I "$GITHUB_ACTION_PATH/scripts/check_repo.py" "${args[@]}"

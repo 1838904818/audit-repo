@@ -240,6 +240,94 @@ jobs:
           assert snapshot["file_count"] == 1
           PY
 
+      - name: Prove GitHub expressions preserve real CRLF input separators
+        shell: bash
+        env:
+          CRLF_INCLUDE_PATHS: ${{ fromJSON('"*\r\nREADME.md"') }}
+          CRLF_EXCLUDE_PATHS: ${{ fromJSON('"excluded/**\r\ntemp/**"') }}
+          CRLF_EXCLUDE_DIRS: ${{ fromJSON('"cache-extra\r\nfixtures-large"') }}
+        run: |
+          python -I - <<'PY'
+          import os
+
+          assert os.environ["CRLF_INCLUDE_PATHS"].encode() == b"*\r\nREADME.md"
+          assert os.environ["CRLF_EXCLUDE_PATHS"].encode() == b"excluded/**\r\ntemp/**"
+          assert os.environ["CRLF_EXCLUDE_DIRS"].encode() == b"cache-extra\r\nfixtures-large"
+          PY
+
+      - name: Exercise CRLF-separated Action input values
+        id: crlf_inputs
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/audit repo action fixture
+          output-dir: ${{ runner.temp }}/audit repo crlf input output
+          scan-mode: filesystem
+          include-paths: ${{ fromJSON('"*\r\nREADME.md"') }}
+          exclude-paths: ${{ fromJSON('"excluded/**\r\ntemp/**"') }}
+          exclude-dirs: ${{ fromJSON('"cache-extra\r\nfixtures-large"') }}
+
+      - name: Verify CRLF inputs are normalized before shared validation
+        shell: bash
+        env:
+          OUTPUT_DIR: ${{ runner.temp }}/audit repo crlf input output
+          ACTION_SNAPSHOT: ${{ steps.crlf_inputs.outputs.snapshot }}
+        run: |
+          python -I - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          output_dir = Path(os.environ["OUTPUT_DIR"]).resolve()
+          snapshot_path = Path(os.environ["ACTION_SNAPSHOT"]).resolve()
+          assert snapshot_path == output_dir / "snapshot.json"
+          snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+          assert snapshot["include_path_patterns"] == ["*", "README.md"]
+          assert snapshot["exclude_path_patterns"] == ["excluded/**", "temp/**"]
+          assert snapshot["excluded_directory_names"] == ["cache-extra", "fixtures-large"]
+          assert all(
+              "\r" not in value
+              for field in (
+                  "include_path_patterns", "exclude_path_patterns", "excluded_directory_names",
+              )
+              for value in snapshot[field]
+          )
+          assert snapshot["file_count"] == 1
+          PY
+
+      - name: Expected failure - an embedded CR remains invalid
+        id: embedded_cr_input
+        continue-on-error: true
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/audit repo action fixture
+          output-dir: ${{ runner.temp }}/audit repo embedded cr output
+          scan-mode: filesystem
+          include-paths: ${{ fromJSON('"safe\rinside/**"') }}
+
+      - name: Verify embedded CR rejection has no Action side effect
+        shell: bash
+        env:
+          EMBEDDED_CR_OUTCOME: ${{ steps.embedded_cr_input.outcome }}
+          EMBEDDED_CR_OUTPUTS: ${{ toJSON(steps.embedded_cr_input.outputs) }}
+          OUTPUT_DIR: ${{ runner.temp }}/audit repo embedded cr output
+        run: |
+          python -I - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          assert os.environ["EMBEDDED_CR_OUTCOME"] == "failure"
+          public_outputs = {
+              "snapshot", "report", "comparison", "sarif", "attention-count", "comparable",
+              "tool-version", "scan-semantics-version",
+          }
+          outputs = json.loads(os.environ["EMBEDDED_CR_OUTPUTS"])
+          assert isinstance(outputs, dict), outputs
+          assert set(outputs).issubset(public_outputs), outputs
+          assert all(outputs.get(name) in ("", None) for name in public_outputs), outputs
+          assert not Path(os.environ["OUTPUT_DIR"]).exists()
+          PY
+
       - name: Add a sensitive-looking file after the baseline
         shell: bash
         env:
