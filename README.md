@@ -131,7 +131,7 @@ python scripts/check_repo.py /path/to/repo \
   --fail-on-attention --require-comparable
 ```
 
-`--baseline-sha256` accepts exactly 64 hexadecimal characters (uppercase or lowercase) and checks the baseline's raw bytes before parsing it. Prefixes, whitespace, and checksum-file lines are rejected. JSON formatting, a byte-order mark, trailing newlines, and LF/CRLF conversion all change the digest. Obtain the expected digest independently from maintainer-controlled configuration or a separately verified artifact; do not calculate it from the same untrusted baseline immediately before this check.
+`--baseline-sha256` accepts exactly 64 hexadecimal characters (uppercase or lowercase) and checks the baseline's raw bytes before parsing it. Prefixes, whitespace, and checksum-file lines are rejected. JSON formatting, a byte-order mark, trailing newlines, and LF/CRLF conversion all change the digest. Snapshot JSON must also have unique object keys at every nesting level; duplicate keys are rejected because JSON consumers disagree on first-value versus last-value interpretation. Obtain the expected digest independently from maintainer-controlled configuration or a separately verified artifact; do not calculate it from the same untrusted baseline immediately before this check.
 
 Before each run, the runner removes only those four managed output paths so reused directories cannot expose stale reports. It preflights all four paths, preserves every other entry, and fails with exit code `2` without deleting any sibling artifact when a managed path is a directory. Enabling either comparison gate without `--baseline` is also invalid. A malformed digest, digest without a baseline, digest mismatch, unreadable baseline, or invalid baseline fails before the output directory is created or any managed artifact or GitHub Action output is changed. When supplied, the baseline is read once, checked, parsed as strict UTF-8 JSON, and kept in memory for the comparison. The digest remains optional; valid, unchanged baselines retain the same comparison semantics and results when it is omitted, although the runner still reads and freezes the baseline before collection.
 
@@ -173,7 +173,7 @@ Run `python scripts/collect_repo_signals.py --help` or `python scripts/compare_r
 Use the repository directly as a composite Action. Pin a release tag or commit SHA in production workflows:
 
 ```yaml
-- uses: 1838904818/audit-repo@v1.10.2
+- uses: 1838904818/audit-repo@v1.10.3
   id: audit
   with:
     scan-mode: tracked
@@ -196,7 +196,7 @@ For a checked-in baseline, enable both policy gates:
       exit 2
     }
 
-- uses: 1838904818/audit-repo@v1.10.2
+- uses: 1838904818/audit-repo@v1.10.3
   with:
     baseline: .github/audit-baseline.json
     baseline-sha256: ${{ vars.AUDIT_BASELINE_SHA256 }}
@@ -210,7 +210,7 @@ For a checked-in baseline, enable both policy gates:
 
 `include-paths`, `exclude-paths`, and `exclude-dirs` accept newline-separated values. Each non-empty `exclude-dirs` line is one directory name, not a path; the Action safely preserves a leading `-` in that name. Create the approved baseline with the same exclusions so the baseline file does not become part of its own comparison scope. Configure the non-secret digest variable through maintainer-controlled repository or environment settings, and keep the explicit format check: an unset Actions variable expands to an empty value, which otherwise means no digest pin was requested. Policy inputs accept only the exact strings `true` and `false`. Leave both gates false for a collection-only run: enabling either gate without `baseline`, or supplying another boolean spelling, is rejected as invalid configuration instead of silently disabling policy.
 
-Digest matching proves only that the baseline has the expected exact bytes. It does not prove authorship, freshness, review status, safety, or comparison compatibility, and it does not replace `require-comparable`. In a `pull_request` workflow, a baseline and digest both loaded from the untrusted pull-request checkout—or a digest calculated from that baseline in the same job—do not form an independent security gate. Load the baseline from a protected base ref or separately trusted artifact, obtain its expected digest through an independent maintainer-controlled channel, and verify both before comparison.
+Digest matching proves only that the baseline has the expected exact bytes. It does not prove authorship, freshness, review status, safety, unambiguous JSON semantics, or comparison compatibility, and it does not replace strict parsing or `require-comparable`. In a `pull_request` workflow, a baseline and digest both loaded from the untrusted pull-request checkout—or a digest calculated from that baseline in the same job—do not form an independent security gate. Load the baseline from a protected base ref or separately trusted artifact, obtain its expected digest through an independent maintainer-controlled channel, and verify both before comparison.
 
 ## What the audit covers
 
@@ -270,7 +270,7 @@ python -m unittest discover -s scripts -p "test_*.py"
 Build the same deterministic assets used by GitHub Releases:
 
 ```bash
-python scripts/package_skill.py --version v1.10.2 --output-dir dist
+python scripts/package_skill.py --version v1.10.3 --output-dir dist
 ```
 
 The requested package version must match `TOOL_VERSION` in `scripts/collect_repo_signals.py`.

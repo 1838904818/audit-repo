@@ -72,6 +72,27 @@ class CompareRepoSignalsTests(unittest.TestCase):
             ):
                 MODULE.load_snapshot_bytes(invalid, path)
 
+    def test_load_snapshot_bytes_rejects_duplicate_object_keys_at_any_depth(self) -> None:
+        path = Path("ambiguous-baseline.json")
+        valid = json.dumps(snapshot(), ensure_ascii=True)
+        top_level = '{"root":"review-visible-root",' + valid[1:]
+        nested = valid.replace(
+            '"automation": {"configured_tools": ["pytest"]}',
+            '"automation": {"configured_tools": [], "configured_tools": ["pytest"]}',
+            1,
+        )
+        self.assertNotEqual(nested, valid)
+
+        for label, content, key in (
+            ("top-level", top_level, "root"),
+            ("nested", nested, "configured_tools"),
+        ):
+            with self.subTest(label=label), self.assertRaisesRegex(
+                MODULE.SnapshotError,
+                rf"duplicate JSON object key '{key}'.*ambiguous-baseline\.json",
+            ):
+                MODULE.load_snapshot_bytes(content.encode("utf-8"), path)
+
     def test_reports_high_confidence_attention_items(self) -> None:
         before = snapshot()
         after = snapshot(
@@ -502,6 +523,28 @@ class CompareRepoSignalsTests(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertIn("Sensitive-looking filename added", result.stdout)
             self.assertEqual(result.stderr, "")
+
+    def test_cli_rejects_duplicate_snapshot_keys_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            before_path = Path(temp_dir) / "before.json"
+            after_path = Path(temp_dir) / "after.json"
+            valid = json.dumps(snapshot(), ensure_ascii=True)
+            before_path.write_text('{"root":"review-visible-root",' + valid[1:], encoding="utf-8")
+            after_path.write_text(valid, encoding="utf-8")
+
+            result = subprocess.run(
+                [sys.executable, str(MODULE_PATH), str(before_path), str(after_path)],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=10,
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(result.stdout, "")
+            self.assertIn("duplicate JSON object key 'root'", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
 
     def test_cli_require_comparable_handles_limitations_only_and_combines(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

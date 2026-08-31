@@ -512,6 +512,155 @@ jobs:
           assert after == before, (before, after)
           PY
 
+      - name: Build an exact-digest baseline with a duplicate top-level root key
+        id: duplicate_root_seed
+        shell: bash
+        env:
+          BASELINE_PATH: ${{ runner.temp }}/audit repo baseline output/snapshot.json
+          DUPLICATE_BASELINE: ${{ runner.temp }}/audit repo duplicate root baseline.json
+          OUTPUT_DIR: ${{ runner.temp }}/audit repo duplicate root output
+          DEFAULT_PARENT: ${{ runner.temp }}
+        run: |
+          python -I - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          baseline_path = Path(os.environ["BASELINE_PATH"])
+          baseline_text = baseline_path.read_text(encoding="utf-8")
+          baseline = json.loads(baseline_text)
+          opening_brace = baseline_text.index("{")
+          duplicate_root_member = (
+              json.dumps("root") + ": "
+              + json.dumps(baseline["root"], ensure_ascii=True) + ","
+          )
+          ambiguous_text = (
+              baseline_text[:opening_brace + 1]
+              + "\n  " + duplicate_root_member
+              + baseline_text[opening_brace + 1:]
+          )
+          ambiguous_bytes = ambiguous_text.encode("utf-8")
+          top_level_pairs = json.loads(ambiguous_bytes, object_pairs_hook=list)
+          assert [name for name, _ in top_level_pairs].count("root") == 2
+          duplicate_baseline = Path(os.environ["DUPLICATE_BASELINE"])
+          duplicate_baseline.write_bytes(ambiguous_bytes)
+
+          output_dir = Path(os.environ["OUTPUT_DIR"])
+          output_dir.mkdir()
+          output_dir.joinpath("keep").mkdir()
+          for index, name in enumerate((
+              "snapshot.json", "report.md", "comparison.json",
+              "comparison.sarif", "keep/sentinel.bin",
+          ), start=1):
+              output_dir.joinpath(name).write_bytes(
+                  bytes((0, index, 255)) + f"preserve duplicate root {name}\r\n".encode()
+              )
+
+          def tree_state(root):
+              state = {}
+              for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
+                  relative = path.relative_to(root).as_posix()
+                  if path.is_dir():
+                      state[relative] = {"kind": "directory"}
+                  else:
+                      state[relative] = {"kind": "file", "bytes": path.read_bytes().hex()}
+              return state
+
+          default_parent = Path(os.environ["DEFAULT_PARENT"])
+          before = {
+              "explicit": tree_state(output_dir),
+              "default_entries": sorted(
+                  path.name for path in default_parent.glob("audit-repo-*")
+              ),
+          }
+          default_parent.joinpath("duplicate-key-before.json").write_text(
+              json.dumps(before, sort_keys=True), encoding="utf-8",
+          )
+          digest = hashlib.sha256(ambiguous_bytes).hexdigest()
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8", newline="\n") as stream:
+              stream.write(f"sha256={digest}\n")
+          PY
+
+      - name: Expected failure - duplicate root key with matching digest preserves explicit output
+        id: duplicate_root_explicit
+        continue-on-error: true
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/audit repo action fixture
+          output-dir: ${{ runner.temp }}/audit repo duplicate root output
+          baseline: ${{ runner.temp }}/audit repo duplicate root baseline.json
+          baseline-sha256: ${{ steps.duplicate_root_seed.outputs.sha256 }}
+          scan-mode: filesystem
+          scope-id: ${{ github.repository }}:action-policy-e2e
+
+      - name: Expected failure - duplicate root key with matching digest allocates no default output
+        id: duplicate_root_default
+        continue-on-error: true
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/audit repo action fixture
+          baseline: ${{ runner.temp }}/audit repo duplicate root baseline.json
+          baseline-sha256: ${{ steps.duplicate_root_seed.outputs.sha256 }}
+          scan-mode: filesystem
+          scope-id: ${{ github.repository }}:action-policy-e2e
+
+      - name: Verify duplicate-key rejection preserves every Action output
+        shell: bash
+        env:
+          DUPLICATE_EXPLICIT_OUTCOME: ${{ steps.duplicate_root_explicit.outcome }}
+          DUPLICATE_DEFAULT_OUTCOME: ${{ steps.duplicate_root_default.outcome }}
+          DUPLICATE_EXPLICIT_OUTPUTS: ${{ toJSON(steps.duplicate_root_explicit.outputs) }}
+          DUPLICATE_DEFAULT_OUTPUTS: ${{ toJSON(steps.duplicate_root_default.outputs) }}
+          EXPECTED_SHA256: ${{ steps.duplicate_root_seed.outputs.sha256 }}
+          DUPLICATE_BASELINE: ${{ runner.temp }}/audit repo duplicate root baseline.json
+          OUTPUT_DIR: ${{ runner.temp }}/audit repo duplicate root output
+          DEFAULT_PARENT: ${{ runner.temp }}
+        run: |
+          python -I - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          for outcome_name in ("DUPLICATE_EXPLICIT_OUTCOME", "DUPLICATE_DEFAULT_OUTCOME"):
+              assert os.environ[outcome_name] == "failure", (outcome_name, os.environ[outcome_name])
+          public_outputs = {
+              "snapshot", "report", "comparison", "sarif", "attention-count", "comparable",
+              "tool-version", "scan-semantics-version",
+          }
+          for outputs_name in ("DUPLICATE_EXPLICIT_OUTPUTS", "DUPLICATE_DEFAULT_OUTPUTS"):
+              outputs = json.loads(os.environ[outputs_name])
+              assert isinstance(outputs, dict), (outputs_name, outputs)
+              assert set(outputs).issubset(public_outputs), (outputs_name, outputs)
+              assert all(outputs.get(name) in ("", None) for name in public_outputs), (outputs_name, outputs)
+
+          ambiguous_bytes = Path(os.environ["DUPLICATE_BASELINE"]).read_bytes()
+          assert hashlib.sha256(ambiguous_bytes).hexdigest() == os.environ["EXPECTED_SHA256"]
+          ambiguous_text = ambiguous_bytes.decode("utf-8")
+          top_level_pairs = json.loads(ambiguous_text, object_pairs_hook=list)
+          assert [name for name, _ in top_level_pairs].count("root") == 2
+
+          def tree_state(root):
+              state = {}
+              for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
+                  relative = path.relative_to(root).as_posix()
+                  if path.is_dir():
+                      state[relative] = {"kind": "directory"}
+                  else:
+                      state[relative] = {"kind": "file", "bytes": path.read_bytes().hex()}
+              return state
+
+          default_parent = Path(os.environ["DEFAULT_PARENT"])
+          before = json.loads(
+              default_parent.joinpath("duplicate-key-before.json").read_text(encoding="utf-8")
+          )
+          output_dir = Path(os.environ["OUTPUT_DIR"])
+          assert tree_state(output_dir) == before["explicit"]
+          after = sorted(path.name for path in default_parent.glob("audit-repo-*"))
+          assert after == before["default_entries"], (before["default_entries"], after)
+          PY
+
       - name: Seed invalid collection-input rejection outputs
         id: invalid_collection_seed
         shell: bash

@@ -43,6 +43,19 @@ def reject_json_constant(value: str) -> None:
     raise SnapshotError(f"non-finite JSON number is not supported: {value}")
 
 
+def unique_json_object(pairs: list[tuple[str, Any]], source: Path) -> dict[str, Any]:
+    """Build one JSON object while rejecting parser-dependent duplicate keys."""
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            display = ascii(key)
+            if len(display) > 120:
+                display = display[:117] + "..."
+            raise SnapshotError(f"duplicate JSON object key {display} in {source}")
+        result[key] = value
+    return result
+
+
 def validate_unique_paths(items: list[Any], field: str, source: Path) -> None:
     seen: set[str] = set()
     for item in items:
@@ -173,7 +186,11 @@ def validate_snapshot(raw: dict[str, Any], path: Path) -> None:
 def load_snapshot_bytes(content: bytes, path: Path) -> dict[str, Any]:
     try:
         text = content.decode("utf-8")
-        raw = json.loads(text, parse_constant=reject_json_constant)
+        raw = json.loads(
+            text,
+            parse_constant=reject_json_constant,
+            object_pairs_hook=lambda pairs: unique_json_object(pairs, path),
+        )
     except SnapshotError:
         raise
     except (UnicodeError, ValueError, RecursionError) as error:

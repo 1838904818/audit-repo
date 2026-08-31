@@ -102,9 +102,9 @@ class CheckRepoTests(unittest.TestCase):
             self.assertIn("attention-count=0\n", outputs)
             self.assertIn("comparable=true\n", outputs)
             self.assertIn("sarif=", outputs)
-            self.assertIn("tool-version=1.10.2\n", outputs)
+            self.assertIn("tool-version=1.10.3\n", outputs)
             self.assertIn("scan-semantics-version=3\n", outputs)
-            self.assertIn("tool_version=1.10.2\n", second.stdout)
+            self.assertIn("tool_version=1.10.3\n", second.stdout)
 
     def test_comparison_gates_require_baseline_before_output_cleanup(self) -> None:
         gate_combinations = (
@@ -386,6 +386,66 @@ class CheckRepoTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 2)
                 self.assertFalse(output_dir.exists())
                 self.assertEqual(github_output.read_bytes(), original_github_output)
+
+    def test_duplicate_key_baseline_with_matching_digest_has_no_output_side_effects(self) -> None:
+        with tempfile.TemporaryDirectory() as repository_dir, tempfile.TemporaryDirectory() as baseline_dir:
+            Path(repository_dir, "README.md").write_text("# Example\n", encoding="utf-8")
+            created = self.run_check(
+                repository_dir, "--scan-mode", "filesystem", "--output-dir", baseline_dir,
+            )
+            self.assertEqual(created.returncode, 0, created.stderr)
+            baseline = Path(baseline_dir, "snapshot.json")
+            valid = baseline.read_bytes()
+            ambiguous = b'{"root":"review-visible-root",' + valid[1:]
+            self.assertNotEqual(ambiguous, valid)
+            baseline.write_bytes(ambiguous)
+            digest = hashlib.sha256(ambiguous).hexdigest()
+
+            for output_mode in ("existing", "missing", "temporary"):
+                with self.subTest(output_mode=output_mode), tempfile.TemporaryDirectory() as parent_dir:
+                    parent = Path(parent_dir)
+                    github_output = parent / "github-output.txt"
+                    original_github_output = b"preserve github output\n"
+                    github_output.write_bytes(original_github_output)
+                    sentinels: dict[str, bytes] = {}
+                    if output_mode == "temporary":
+                        temporary_parent = parent / "temporary"
+                        temporary_parent.mkdir()
+                        output_arguments = ("--temporary-output-parent", str(temporary_parent))
+                        children_before = sorted(temporary_parent.iterdir())
+                    else:
+                        output_dir = parent / "results"
+                        output_arguments = ("--output-dir", str(output_dir))
+                        if output_mode == "existing":
+                            output_dir.mkdir()
+                            sentinels = {
+                                name: f"preserve {name}\r\n".encode()
+                                for name in ("snapshot.json", "report.md", "comparison.json", "comparison.sarif")
+                            }
+                            for name, content in sentinels.items():
+                                output_dir.joinpath(name).write_bytes(content)
+
+                    result = self.run_check(
+                        repository_dir,
+                        "--scan-mode", "filesystem",
+                        *output_arguments,
+                        "--baseline", str(baseline),
+                        "--baseline-sha256", digest,
+                        "--github-output", str(github_output),
+                    )
+
+                    self.assertEqual(result.returncode, 2)
+                    self.assertIn("duplicate JSON object key 'root'", result.stderr)
+                    self.assertNotIn("SHA-256 mismatch", result.stderr)
+                    self.assertNotIn("Traceback", result.stderr)
+                    self.assertEqual(github_output.read_bytes(), original_github_output)
+                    if output_mode == "temporary":
+                        self.assertEqual(sorted(temporary_parent.iterdir()), children_before)
+                    elif output_mode == "missing":
+                        self.assertFalse(output_dir.exists())
+                    else:
+                        for name, content in sentinels.items():
+                            self.assertEqual(output_dir.joinpath(name).read_bytes(), content)
 
     def test_baseline_digest_covers_trailing_newline_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as repository_dir, tempfile.TemporaryDirectory() as baseline_dir, \

@@ -2,6 +2,16 @@
 
 All notable changes to `audit-repo` are documented here. The project follows semantic versioning.
 
+## [1.10.3] - 2026-08-31
+
+### Security
+
+- Reject duplicate JSON object keys at every nesting level instead of silently accepting parser-dependent first-value or last-value semantics.
+- Apply the same strict parser to standalone comparisons, digest-pinned runner baselines, and collector stdout snapshots.
+- Preserve managed reports, GitHub Action output, and unallocated temporary-result state when a digest-matching but duplicate-key baseline fails preflight.
+
+Snapshot schema 1 and scan semantics 3 are unchanged. Unambiguous snapshots remain compatible; any stored snapshot containing duplicate object keys must be regenerated from a reviewed source.
+
 ## [1.10.2] - 2026-08-31
 
 ### Changed
@@ -253,6 +263,7 @@ Because file classification changed, snapshots created before v1.9.0 have a diff
 
 - First stable release of the Codex Skill, repository signal collector, snapshot comparer, tests, and CI.
 
+[1.10.3]: https://github.com/1838904818/audit-repo/compare/v1.10.2...v1.10.3
 [1.10.2]: https://github.com/1838904818/audit-repo/compare/v1.10.1...v1.10.2
 [1.10.1]: https://github.com/1838904818/audit-repo/compare/v1.10.0...v1.10.1
 [1.10.0]: https://github.com/1838904818/audit-repo/compare/v1.9.1...v1.10.0

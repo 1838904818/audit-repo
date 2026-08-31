@@ -248,7 +248,8 @@ class RepositoryContractTests(unittest.TestCase):
         expected_failure_steps = (
             "attention_gate", "comparable_gate", "missing_baseline_gate",
             "digest_without_baseline", "malformed_digest", "digest_mismatch",
-            "digest_mismatch_default", "invalid_max_files_explicit",
+            "digest_mismatch_default", "duplicate_root_explicit", "duplicate_root_default",
+            "invalid_max_files_explicit",
             "invalid_large_file_explicit", "invalid_include_explicit",
             "invalid_exclude_explicit", "invalid_exclude_dirs_explicit", "invalid_scope_explicit",
             "non_git_tracked_explicit", "invalid_max_files_default",
@@ -275,11 +276,13 @@ class RepositoryContractTests(unittest.TestCase):
             ("MALFORMED_OUTCOME", "malformed_digest"),
             ("MISMATCH_OUTCOME", "digest_mismatch"),
             ("DEFAULT_MISMATCH_OUTCOME", "digest_mismatch_default"),
+            ("DUPLICATE_EXPLICIT_OUTCOME", "duplicate_root_explicit"),
+            ("DUPLICATE_DEFAULT_OUTCOME", "duplicate_root_default"),
         ):
             self.assertIn(f"{environment_name}: ${{{{ steps.{step_id}.outcome }}}}", ci)
             outputs_name = environment_name.replace("_OUTCOME", "_OUTPUTS")
             self.assertIn(f"{outputs_name}: ${{{{ toJSON(steps.{step_id}.outputs) }}}}", ci)
-        for step_id in expected_failure_steps[7:17]:
+        for step_id in expected_failure_steps[9:19]:
             self.assertIn(f"steps.{step_id}.outcome", ci)
             self.assertIn(f"toJSON(steps.{step_id}.outputs)", ci)
         self.assertIn('default_parent.joinpath("invalid-collection-before.json")', ci)
@@ -288,6 +291,42 @@ class RepositoryContractTests(unittest.TestCase):
         )
         self.assertEqual(ci.count('baseline-sha256: "' + "0" * 64 + '"'), 2)
         self.assertIn('default_parent.joinpath("digest-before.json")', ci)
+        self.assertEqual(
+            ci.count("baseline-sha256: ${{ steps.duplicate_root_seed.outputs.sha256 }}"), 2,
+        )
+        self.assertEqual(ci.count("id: duplicate_root_seed\n"), 1)
+        self.assertIn('assert [name for name, _ in top_level_pairs].count("root") == 2', ci)
+        self.assertIn("hashlib.sha256(ambiguous_bytes).hexdigest()", ci)
+        self.assertIn('default_parent.joinpath("duplicate-key-before.json")', ci)
+
+        def action_step(step_id: str) -> str:
+            match = re.search(
+                rf"(?ms)^      - name: [^\n]+\n        id: {re.escape(step_id)}\n"
+                rf".*?(?=^      - name: |\Z)",
+                ci,
+            )
+            self.assertIsNotNone(match, f"missing Action step block: {step_id}")
+            return match.group(0) if match else ""
+
+        duplicate_explicit = action_step("duplicate_root_explicit")
+        duplicate_default = action_step("duplicate_root_default")
+        self.assertIn("output-dir: ${{ runner.temp }}/audit repo duplicate root output", duplicate_explicit)
+        self.assertNotIn("output-dir:", duplicate_default)
+
+        verification = re.search(
+            r"(?ms)^      - name: Verify duplicate-key rejection preserves every Action output\n"
+            r".*?(?=^      - name: |\Z)",
+            ci,
+        )
+        self.assertIsNotNone(verification, "missing duplicate-key verification step")
+        verification_block = verification.group(0) if verification else ""
+        for assertion in (
+            'assert all(outputs.get(name) in ("", None) for name in public_outputs)',
+            'assert hashlib.sha256(ambiguous_bytes).hexdigest() == os.environ["EXPECTED_SHA256"]',
+            'assert tree_state(output_dir) == before["explicit"]',
+            'assert after == before["default_entries"]',
+        ):
+            self.assertIn(assertion, verification_block)
         self.assertIn('fail-on-attention: "TRUE"', ci)
         self.assertIn('result["level"] == "warning"', ci)
         self.assertIn('result["level"] == "note"', ci)
