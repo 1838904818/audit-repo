@@ -29,7 +29,7 @@ The easiest option in Codex is to ask the built-in installer to install this rep
 Use $skill-installer to install https://github.com/1838904818/audit-repo.
 ```
 
-For an offline or version-pinned installation, download the `.zip` and matching `.sha256` file from the [latest release](https://github.com/1838904818/audit-repo/releases/latest). Verify the checksum, then extract the archive's top-level `audit-repo` directory into `$HOME/.agents/skills`. Release assets are built only after the full test matrix passes on Linux, Windows, and macOS with Python 3.10 and 3.14. Before repository code runs, publishing verifies that the remote tag resolves to the workflow event commit on the default branch. It then verifies that the Release is stable and its exact two-asset set matches the current deterministic build, and rechecks tag/default-branch provenance after the online assets match. A run that finds an existing published Release leaves it unchanged and verifies it; an existing draft fails closed without being edited or deleted.
+For an offline or version-pinned installation, download the `.zip` and matching `.sha256` file from the [latest release](https://github.com/1838904818/audit-repo/releases/latest). Verify the checksum, then extract the archive's top-level `audit-repo` directory into `$HOME/.agents/skills`. Release assets are built only after the full test matrix passes on Linux, Windows, and macOS with Python 3.10 and 3.14. Before repository code runs, publishing verifies that the remote tag resolves to the workflow event commit on the default branch. It then requires the published Release to be immutable, verifies that its exact two-asset set matches the current deterministic build, and rechecks tag/default-branch provenance after the online assets match. A run that finds an existing published Release leaves it unchanged and verifies it; an existing draft fails closed without being edited or deleted. Immutability applies to v1.10.7 and later releases, not historical releases created before the repository setting was enabled.
 
 For a manual user-wide installation, clone the repository into the official local skills directory. See the [OpenAI Build skills documentation](https://learn.chatgpt.com/docs/build-skills) for current locations and invocation methods.
 
@@ -112,7 +112,7 @@ v1.9.0 also advances scan semantics to version 2. Snapshots created by v1.8.x th
 
 v1.9.1 advances scan semantics to version 3 because Windows junction and reparse-point traversal is now excluded consistently with symbolic links. A v1.9.0 baseline therefore produces a deliberate limitation; review the boundary change and regenerate the approved baseline before restoring `--require-comparable`.
 
-Manifest and lockfile inventory uses canonical, case-sensitive filenames so a snapshot does not claim that an ecosystem tool will consume a mis-cased file on a case-sensitive platform. The inventory includes SwiftPM version-specific manifests and NuGet project-specific lockfiles. GitHub Action references are lexical workflow signals: script and description block contents are excluded, while an unambiguous single-line block value attached to `uses` is recognized.
+Manifest and lockfile inventory uses canonical, case-sensitive filenames so a snapshot does not claim that an ecosystem tool will consume a mis-cased file on a case-sensitive platform. The inventory includes SwiftPM version-specific manifests and NuGet project-specific lockfiles. GitHub Action references are lexical workflow signals: script and description block contents are excluded, while an unambiguous single-line block value attached to `uses` is recognized. A pinning policy must fail closed on YAML anchors, aliases, tags, and explicit mapping-key syntax that can make a parsed dependency key differ from a simple textual search.
 
 Compare two snapshots:
 
@@ -173,7 +173,7 @@ Run `python scripts/collect_repo_signals.py --help` or `python scripts/compare_r
 Use the repository directly as a composite Action. Pin a release tag or commit SHA in production workflows:
 
 ```yaml
-- uses: 1838904818/audit-repo@v1.10.6
+- uses: 1838904818/audit-repo@v1.10.7
   id: audit
   with:
     scan-mode: tracked
@@ -196,7 +196,7 @@ For a checked-in baseline, enable both policy gates:
       exit 2
     }
 
-- uses: 1838904818/audit-repo@v1.10.6
+- uses: 1838904818/audit-repo@v1.10.7
   with:
     baseline: .github/audit-baseline.json
     baseline-sha256: ${{ vars.AUDIT_BASELINE_SHA256 }}
@@ -270,7 +270,7 @@ python -m unittest discover -s scripts -p "test_*.py"
 Build the same deterministic assets used by GitHub Releases:
 
 ```bash
-python scripts/package_skill.py --version v1.10.6 --output-dir dist
+python scripts/package_skill.py --version v1.10.7 --output-dir dist
 ```
 
 The requested package version must match `TOOL_VERSION` in `scripts/collect_repo_signals.py`.

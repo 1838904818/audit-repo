@@ -2,6 +2,15 @@
 
 All notable changes to `audit-repo` are documented here. The project follows semantic versioning.
 
+## [1.10.7] - 2026-08-31
+
+### Security
+
+- Reject YAML explicit mapping-key syntax inside flow collections when enforcing the repository's workflow `uses` pin contract. Forms such as `{ ? uses: owner/project@main }` can parse as a real dependency key and now fail closed.
+- Require newly published GitHub Releases to report `immutable: true` before the release workflow succeeds, complementing exact asset-set, byte-identity, and tag-provenance verification.
+
+Snapshot schema 1 and scan semantics 3 are unchanged. Existing snapshots remain comparable when their scan settings and logical scopes match.
+
 ## [1.10.6] - 2026-08-31
 
 ### Security
@@ -292,6 +301,7 @@ Because file classification changed, snapshots created before v1.9.0 have a diff
 
 - First stable release of the Codex Skill, repository signal collector, snapshot comparer, tests, and CI.
 
+[1.10.7]: https://github.com/1838904818/audit-repo/compare/v1.10.6...v1.10.7
 [1.10.6]: https://github.com/1838904818/audit-repo/compare/v1.10.5...v1.10.6
 [1.10.5]: https://github.com/1838904818/audit-repo/compare/v1.10.4...v1.10.5
 [1.10.4]: https://github.com/1838904818/audit-repo/compare/v1.10.3...v1.10.4

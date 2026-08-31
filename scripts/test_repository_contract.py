@@ -207,7 +207,7 @@ class RepositoryContractTests(unittest.TestCase):
         )
         self.assertNotRegex(
             policy_surface,
-            r"(?m)^\s*(?:-\s+)?\?\s+",
+            r"(?m)(?:^\s*(?:-\s+)?|[,{]\s*)\?\s+",
             f"explicit workflow mapping keys are not allowed in {source}",
         )
 
@@ -357,6 +357,24 @@ jobs:
             (
                 "explicit uses key",
                 valid + "\n  explicit:\n    ? uses\n    : owner/project@main\n",
+            ),
+            (
+                "flow explicit uses key",
+                valid
+                + "\n  flow_explicit:\n    steps:\n"
+                + "      - { ? uses: owner/project@main }\n",
+            ),
+            (
+                "compact flow explicit uses key",
+                valid
+                + "\n  compact_flow_explicit:\n    steps:\n"
+                + "      - {? uses: owner/project@main}\n",
+            ),
+            (
+                "flow explicit uses key after comma",
+                valid
+                + "\n  flow_explicit_after_comma:\n    steps:\n"
+                + "      - { name: bad, ? uses: owner/project@main }\n",
             ),
             (
                 "anchor before uses key",
@@ -530,6 +548,7 @@ jobs:
         self.assertIn('release.get("tag_name") != expected_tag', workflow)
         self.assertIn('release.get("draft") is not False', workflow)
         self.assertIn('release.get("prerelease") is not False', workflow)
+        self.assertIn('release.get("immutable") is not True', workflow)
         self.assertIn('target_commitish = release.get("target_commitish")', workflow)
         self.assertIn('not isinstance(target_commitish, str) or not target_commitish', workflow)
         self.assertIn('asset.get("state") != "uploaded"', workflow)
@@ -545,7 +564,7 @@ jobs:
         self.assertIn('cmp "dist/${EXPECTED_ZIP}"', workflow)
         self.assertIn('cmp "dist/${EXPECTED_CHECKSUM}"', workflow)
         for forbidden in (
-            "dist/*", "--clobber", "gh release edit", "gh release upload", "gh release delete",
+            "dist/*", "--clobber", "--draft", "gh release edit", "gh release upload", "gh release delete",
             'grep -Fq "HTTP 404"',
             'repos/${GITHUB_REPOSITORY}/commits/${GITHUB_REF_NAME}',
             'repos/${GITHUB_REPOSITORY}/commits/${TAG_PATH}',

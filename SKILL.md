@@ -15,7 +15,7 @@ Produce a useful repository audit without changing the repository. Combine deter
 - Scan a quiescent checkout. Do not run untrusted repository code concurrently with collection; another process can replace a path between filesystem checks and reads, invalidating the point-in-time evidence. Use an isolated checkout when concurrent writers cannot be excluded.
 - Never expose credentials to repository code. Skip any check that may read secrets, write outside the repository and designated output directory, contact the network or production services, or make persistent changes unless the user separately authorizes that effect and the environment contains the risk.
 - A matching `--baseline-sha256` proves only the baseline's exact bytes. Obtain the expected digest through an independent trusted channel; a digest calculated from the same untrusted checkout adds no protection and does not prove provenance, freshness, safety, or comparability.
-- Workflow YAML can use anchors, aliases, and tags to obscure a parsed dependency key. Treat lexical Action references as signals, require canonical dependency keys for a pinning policy, and do not claim every external `uses` reference is pinned from a simple text search.
+- Workflow YAML can use anchors, aliases, tags, and explicit mapping-key syntax in block or flow collections to obscure a parsed dependency key. Treat lexical Action references as signals, require canonical dependency keys for a pinning policy, and do not claim every external `uses` reference is pinned from a simple text search.
 
 ## Workflow
 

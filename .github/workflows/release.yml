@@ -228,6 +228,8 @@ jobs:
               errors.append("release is a draft")
           if release.get("prerelease") is not False:
               errors.append("release is a prerelease")
+          if release.get("immutable") is not True:
+              errors.append("release is not immutable")
           target_commitish = release.get("target_commitish")
           if not isinstance(target_commitish, str) or not target_commitish:
               errors.append("targetCommitish is missing")
