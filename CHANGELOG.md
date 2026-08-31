@@ -2,6 +2,17 @@
 
 All notable changes to `audit-repo` are documented here. The project follows semantic versioning.
 
+## [1.10.4] - 2026-08-31
+
+### Security
+
+- Limit external comparison snapshots and runner baselines to regular files of at most 64 MiB, preventing unbounded reads and rejecting devices, pipes, and other special files.
+- Bind each accepted input with one file descriptor, check its opened target, and read at most one byte beyond the limit so file growth cannot bypass the bound. Symlinks whose opened targets are regular files remain supported.
+- Keep runner baseline digest verification and strict parsing on the same captured bytes, before managed output creation, cleanup, temporary-result allocation, or GitHub Action output.
+- Escape and bound untrusted snapshot, scan-root, and managed-output path context in errors so control characters cannot forge extra CI log lines or workflow commands.
+
+Snapshot schema 1 and scan semantics 3 are unchanged. Previously accepted regular, unambiguous snapshots no larger than 64 MiB remain compatible; larger or non-regular stored inputs must be replaced before comparison.
+
 ## [1.10.3] - 2026-08-31
 
 ### Security
@@ -263,6 +274,7 @@ Because file classification changed, snapshots created before v1.9.0 have a diff
 
 - First stable release of the Codex Skill, repository signal collector, snapshot comparer, tests, and CI.
 
+[1.10.4]: https://github.com/1838904818/audit-repo/compare/v1.10.3...v1.10.4
 [1.10.3]: https://github.com/1838904818/audit-repo/compare/v1.10.2...v1.10.3
 [1.10.2]: https://github.com/1838904818/audit-repo/compare/v1.10.1...v1.10.2
 [1.10.1]: https://github.com/1838904818/audit-repo/compare/v1.10.0...v1.10.1

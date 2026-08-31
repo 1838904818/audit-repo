@@ -311,9 +311,9 @@ class CollectRepoSignalsTests(unittest.TestCase):
             data = MODULE.collect(root, 100)
             rendered = MODULE.to_markdown(data)
 
-            self.assertEqual(data["tool_version"], "1.10.3")
+            self.assertEqual(data["tool_version"], "1.10.4")
             self.assertEqual(data["scan_semantics_version"], 3)
-            self.assertIn("Collector version: `1.10.3`", rendered)
+            self.assertIn("Collector version: `1.10.4`", rendered)
             self.assertIn("Scan semantics version: 3", rendered)
             self.assertFalse(data["git_repository"])
             self.assertEqual(data["test_file_count"], 1)
@@ -1003,6 +1003,26 @@ class CollectRepoSignalsTests(unittest.TestCase):
                 self.assertIn(message, result.stderr)
                 self.assertNotIn("Traceback", result.stderr)
                 self.assertEqual(output.read_bytes(), original)
+
+    @unittest.skipIf(os.name == "nt", "Windows filenames cannot contain control characters")
+    def test_cli_escapes_control_characters_in_scan_root_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir, "missing\n::warning title=forged::scan-root")
+            output = Path(temp_dir, "collector-output.json")
+            original = b"preserve collector output\n"
+            output.write_bytes(original)
+            result = subprocess.run(
+                [sys.executable, "-I", str(MODULE_PATH), str(root), "--output", str(output)],
+                check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10,
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(result.stdout, "")
+            self.assertEqual(len(result.stderr.splitlines()), 1, result.stderr)
+            self.assertIn(r"\n::warning title=forged::scan-root", result.stderr)
+            self.assertNotIn("\n::warning title=forged::scan-root", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertEqual(output.read_bytes(), original)
 
     def test_cli_reports_stdout_encoding_failure_without_traceback(self) -> None:
         environment = os.environ.copy()

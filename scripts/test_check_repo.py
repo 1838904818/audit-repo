@@ -102,9 +102,9 @@ class CheckRepoTests(unittest.TestCase):
             self.assertIn("attention-count=0\n", outputs)
             self.assertIn("comparable=true\n", outputs)
             self.assertIn("sarif=", outputs)
-            self.assertIn("tool-version=1.10.3\n", outputs)
+            self.assertIn("tool-version=1.10.4\n", outputs)
             self.assertIn("scan-semantics-version=3\n", outputs)
-            self.assertIn("tool_version=1.10.3\n", second.stdout)
+            self.assertIn("tool_version=1.10.4\n", second.stdout)
 
     def test_comparison_gates_require_baseline_before_output_cleanup(self) -> None:
         gate_combinations = (
@@ -446,6 +446,141 @@ class CheckRepoTests(unittest.TestCase):
                     else:
                         for name, content in sentinels.items():
                             self.assertEqual(output_dir.joinpath(name).read_bytes(), content)
+
+    def test_oversized_baseline_has_no_output_side_effects(self) -> None:
+        with tempfile.TemporaryDirectory() as repository_dir, tempfile.TemporaryDirectory() as baseline_dir:
+            Path(repository_dir, "README.md").write_text("# Example\n", encoding="utf-8")
+            baseline = Path(baseline_dir, "oversized.json")
+            with baseline.open("wb") as stream:
+                stream.truncate(MODULE.comparer.MAX_SNAPSHOT_BYTES + 1)
+
+            for output_mode in ("existing", "missing", "temporary"):
+                for expected_digest in (None, "0" * 64):
+                    with self.subTest(
+                        output_mode=output_mode, digest=expected_digest is not None,
+                    ), tempfile.TemporaryDirectory() as parent_dir:
+                        digest_arguments = () if expected_digest is None else (
+                            "--baseline-sha256", expected_digest,
+                        )
+                        parent = Path(parent_dir)
+                        github_output = parent / "github-output.txt"
+                        original_github_output = b"preserve github output\n"
+                        github_output.write_bytes(original_github_output)
+                        sentinels: dict[str, bytes] = {}
+                        if output_mode == "temporary":
+                            temporary_parent = parent / "temporary"
+                            temporary_parent.mkdir()
+                            output_arguments = ("--temporary-output-parent", str(temporary_parent))
+                            children_before = sorted(temporary_parent.iterdir())
+                        else:
+                            output_dir = parent / "results"
+                            output_arguments = ("--output-dir", str(output_dir))
+                            if output_mode == "existing":
+                                output_dir.mkdir()
+                                sentinels = {
+                                    name: f"preserve {name}\r\n".encode()
+                                    for name in ("snapshot.json", "report.md", "comparison.json", "comparison.sarif")
+                                }
+                                for name, content in sentinels.items():
+                                    output_dir.joinpath(name).write_bytes(content)
+
+                        result = self.run_check(
+                            repository_dir,
+                            "--scan-mode", "filesystem",
+                            *output_arguments,
+                            "--baseline", str(baseline),
+                            *digest_arguments,
+                            "--github-output", str(github_output),
+                        )
+
+                        self.assertEqual(result.returncode, 2)
+                        self.assertIn("67108864-byte limit", result.stderr)
+                        self.assertNotIn("SHA-256 mismatch", result.stderr)
+                        self.assertNotIn("Traceback", result.stderr)
+                        self.assertEqual(github_output.read_bytes(), original_github_output)
+                        if output_mode == "temporary":
+                            self.assertEqual(sorted(temporary_parent.iterdir()), children_before)
+                        elif output_mode == "missing":
+                            self.assertFalse(output_dir.exists())
+                        else:
+                            for name, content in sentinels.items():
+                                self.assertEqual(output_dir.joinpath(name).read_bytes(), content)
+
+    @unittest.skipIf(os.name == "nt", "Windows filenames cannot contain control characters")
+    def test_runner_escapes_control_characters_in_baseline_error_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as repository_dir, tempfile.TemporaryDirectory() as parent_dir:
+            Path(repository_dir, "README.md").write_text("# Example\n", encoding="utf-8")
+            parent = Path(parent_dir)
+            github_output = parent / "github-output.txt"
+            original_github_output = b"preserve github output\n"
+            github_output.write_bytes(original_github_output)
+            cases = {"oversized": None, "invalid-json": b"{"}
+            for label, content in cases.items():
+                with self.subTest(label=label):
+                    baseline = parent / f"{label}.json\n::warning title=forged::{label}"
+                    if content is None:
+                        with baseline.open("wb") as stream:
+                            stream.truncate(MODULE.comparer.MAX_SNAPSHOT_BYTES + 1)
+                    else:
+                        baseline.write_bytes(content)
+                    output_dir = parent / f"results-{label}"
+                    result = self.run_check(
+                        repository_dir,
+                        "--scan-mode", "filesystem",
+                        "--output-dir", str(output_dir),
+                        "--baseline", str(baseline),
+                        "--github-output", str(github_output),
+                    )
+
+                    self.assertEqual(result.returncode, 2)
+                    self.assertEqual(result.stdout, "")
+                    self.assertEqual(len(result.stderr.splitlines()), 1, result.stderr)
+                    self.assertIn(r"\n::warning title=forged::", result.stderr)
+                    self.assertNotIn("\n::warning title=forged::", result.stderr)
+                    self.assertNotIn("Traceback", result.stderr)
+                    self.assertFalse(output_dir.exists())
+                    self.assertEqual(github_output.read_bytes(), original_github_output)
+
+    @unittest.skipIf(os.name == "nt", "Windows filenames cannot contain control characters")
+    def test_runner_escapes_control_characters_in_repository_and_output_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as repository_dir, tempfile.TemporaryDirectory() as parent_dir:
+            repository = Path(repository_dir)
+            repository.joinpath("README.md").write_text("# Example\n", encoding="utf-8")
+            parent = Path(parent_dir)
+            github_output = parent / "github-output.txt"
+            original_github_output = b"preserve github output\n"
+            github_output.write_bytes(original_github_output)
+
+            missing_root = parent / "missing\n::warning title=forged::scan-root"
+            missing_output = parent / "missing-root-results"
+            missing = self.run_check(
+                str(missing_root), "--scan-mode", "filesystem",
+                "--output-dir", str(missing_output),
+                "--github-output", str(github_output),
+            )
+
+            collision_output = parent / "results\n::warning title=forged::managed-output"
+            collision_output.mkdir()
+            collision_output.joinpath("snapshot.json").mkdir()
+            collision = self.run_check(
+                repository_dir, "--scan-mode", "filesystem",
+                "--output-dir", str(collision_output),
+                "--github-output", str(github_output),
+            )
+
+            for result, marker in (
+                (missing, "scan-root"), (collision, "managed-output"),
+            ):
+                with self.subTest(marker=marker):
+                    self.assertEqual(result.returncode, 2)
+                    self.assertEqual(result.stdout, "")
+                    self.assertEqual(len(result.stderr.splitlines()), 1, result.stderr)
+                    self.assertIn(rf"\n::warning title=forged::{marker}", result.stderr)
+                    self.assertNotIn(f"\n::warning title=forged::{marker}", result.stderr)
+                    self.assertNotIn("Traceback", result.stderr)
+            self.assertFalse(missing_output.exists())
+            self.assertTrue(collision_output.joinpath("snapshot.json").is_dir())
+            self.assertEqual(github_output.read_bytes(), original_github_output)
 
     def test_baseline_digest_covers_trailing_newline_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as repository_dir, tempfile.TemporaryDirectory() as baseline_dir, \

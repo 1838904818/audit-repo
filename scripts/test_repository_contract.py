@@ -138,7 +138,7 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn('args+=("--baseline-sha256=$AUDIT_BASELINE_SHA256")', action)
         self.assertIn('args+=(-- "$AUDIT_PATH")', action)
         self.assertNotRegex(action, r'(?m)^\s*args=\([^\n]*--scope-id')
-        self.assertIn('baseline_bytes = path.read_bytes()', runner)
+        self.assertIn('baseline_bytes = comparer.read_snapshot_file_bytes(path)', runner)
         self.assertIn('hashlib.sha256(baseline_bytes).hexdigest()', runner)
         self.assertIn('comparer.load_snapshot_bytes(baseline_bytes, path)', runner)
         self.assertIn('comparer.load_snapshot_bytes(completed.stdout, Path("<collector stdout>"))', runner)
@@ -249,6 +249,7 @@ class RepositoryContractTests(unittest.TestCase):
             "attention_gate", "comparable_gate", "missing_baseline_gate",
             "digest_without_baseline", "malformed_digest", "digest_mismatch",
             "digest_mismatch_default", "duplicate_root_explicit", "duplicate_root_default",
+            "oversized_baseline_explicit", "oversized_baseline_default",
             "invalid_max_files_explicit",
             "invalid_large_file_explicit", "invalid_include_explicit",
             "invalid_exclude_explicit", "invalid_exclude_dirs_explicit", "invalid_scope_explicit",
@@ -278,11 +279,13 @@ class RepositoryContractTests(unittest.TestCase):
             ("DEFAULT_MISMATCH_OUTCOME", "digest_mismatch_default"),
             ("DUPLICATE_EXPLICIT_OUTCOME", "duplicate_root_explicit"),
             ("DUPLICATE_DEFAULT_OUTCOME", "duplicate_root_default"),
+            ("OVERSIZED_EXPLICIT_OUTCOME", "oversized_baseline_explicit"),
+            ("OVERSIZED_DEFAULT_OUTCOME", "oversized_baseline_default"),
         ):
             self.assertIn(f"{environment_name}: ${{{{ steps.{step_id}.outcome }}}}", ci)
             outputs_name = environment_name.replace("_OUTCOME", "_OUTPUTS")
             self.assertIn(f"{outputs_name}: ${{{{ toJSON(steps.{step_id}.outputs) }}}}", ci)
-        for step_id in expected_failure_steps[9:19]:
+        for step_id in expected_failure_steps[11:21]:
             self.assertIn(f"steps.{step_id}.outcome", ci)
             self.assertIn(f"toJSON(steps.{step_id}.outputs)", ci)
         self.assertIn('default_parent.joinpath("invalid-collection-before.json")', ci)
@@ -313,6 +316,21 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("output-dir: ${{ runner.temp }}/audit repo duplicate root output", duplicate_explicit)
         self.assertNotIn("output-dir:", duplicate_default)
 
+        oversized_explicit = action_step("oversized_baseline_explicit")
+        oversized_default = action_step("oversized_baseline_default")
+        self.assertIn(
+            "output-dir: ${{ runner.temp }}/audit repo oversized baseline output",
+            oversized_explicit,
+        )
+        self.assertNotIn("output-dir:", oversized_default)
+        oversized_baseline = (
+            "baseline: ${{ runner.temp }}/audit repo oversized external baseline.json"
+        )
+        self.assertIn(oversized_baseline, oversized_explicit)
+        self.assertIn(oversized_baseline, oversized_default)
+        self.assertNotIn("baseline-sha256:", oversized_explicit)
+        self.assertNotIn("baseline-sha256:", oversized_default)
+
         verification = re.search(
             r"(?ms)^      - name: Verify duplicate-key rejection preserves every Action output\n"
             r".*?(?=^      - name: |\Z)",
@@ -327,6 +345,53 @@ class RepositoryContractTests(unittest.TestCase):
             'assert after == before["default_entries"]',
         ):
             self.assertIn(assertion, verification_block)
+
+        oversized_seed = re.search(
+            r"(?ms)^      - name: Seed a sparse oversized external baseline and preserved output tree\n"
+            r".*?(?=^      - name: |\Z)",
+            ci,
+        )
+        self.assertIsNotNone(oversized_seed, "missing oversized-baseline seed step")
+        oversized_seed_block = oversized_seed.group(0) if oversized_seed else ""
+        self.assertIn("stream.truncate(64 * 1024 * 1024 + 1)", oversized_seed_block)
+        self.assertIn(
+            "assert oversized_baseline.stat().st_size == 64 * 1024 * 1024 + 1",
+            oversized_seed_block,
+        )
+        self.assertEqual(
+            oversized_seed_block.count('output_dir.joinpath("keep").mkdir()'), 1,
+        )
+        for seeded_name in (
+            "snapshot.json", "report.md", "comparison.json",
+            "comparison.sarif", "keep/sentinel.bin",
+        ):
+            self.assertEqual(
+                oversized_seed_block.count(f'"{seeded_name}"'), 1,
+                f"oversized-baseline seed must include exactly one {seeded_name}",
+            )
+        self.assertIn("output_dir.joinpath(name).write_bytes(", oversized_seed_block)
+        self.assertNotIn("oversized_baseline.read_bytes", oversized_seed_block)
+        self.assertNotIn("oversized_baseline.read_text", oversized_seed_block)
+        self.assertNotIn("hashlib", oversized_seed_block)
+
+        oversized_verification = re.search(
+            r"(?ms)^      - name: Verify oversized-baseline rejection preserves every Action output\n"
+            r".*?(?=^      - name: |\Z)",
+            ci,
+        )
+        self.assertIsNotNone(oversized_verification, "missing oversized-baseline verification step")
+        oversized_verification_block = oversized_verification.group(0) if oversized_verification else ""
+        for assertion in (
+            'assert all(outputs.get(name) in ("", None) for name in public_outputs)',
+            "assert oversized_baseline.stat().st_size == 64 * 1024 * 1024 + 1",
+            'assert tree_state(output_dir) == before["explicit"]',
+            'assert after == before["default_entries"]',
+        ):
+            self.assertIn(assertion, oversized_verification_block)
+        self.assertNotIn("oversized_baseline.read_bytes", oversized_verification_block)
+        self.assertNotIn("oversized_baseline.read_text", oversized_verification_block)
+        self.assertNotIn("hashlib", oversized_verification_block)
+        self.assertIn('default_parent.joinpath("oversized-baseline-before.json")', ci)
         self.assertIn('fail-on-attention: "TRUE"', ci)
         self.assertIn('result["level"] == "warning"', ci)
         self.assertIn('result["level"] == "note"', ci)

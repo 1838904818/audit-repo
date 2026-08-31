@@ -661,6 +661,129 @@ jobs:
           assert after == before["default_entries"], (before["default_entries"], after)
           PY
 
+      - name: Seed a sparse oversized external baseline and preserved output tree
+        id: oversized_baseline_seed
+        shell: bash
+        env:
+          OVERSIZED_BASELINE: ${{ runner.temp }}/audit repo oversized external baseline.json
+          OUTPUT_DIR: ${{ runner.temp }}/audit repo oversized baseline output
+          DEFAULT_PARENT: ${{ runner.temp }}
+        run: |
+          python -I - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          oversized_baseline = Path(os.environ["OVERSIZED_BASELINE"])
+          with oversized_baseline.open("wb") as stream:
+              stream.truncate(64 * 1024 * 1024 + 1)
+          assert oversized_baseline.stat().st_size == 64 * 1024 * 1024 + 1
+
+          output_dir = Path(os.environ["OUTPUT_DIR"])
+          output_dir.mkdir()
+          output_dir.joinpath("keep").mkdir()
+          for index, name in enumerate((
+              "snapshot.json", "report.md", "comparison.json",
+              "comparison.sarif", "keep/sentinel.bin",
+          ), start=1):
+              output_dir.joinpath(name).write_bytes(
+                  bytes((0, index, 255)) + f"preserve oversized baseline {name}\r\n".encode()
+              )
+
+          def tree_state(root):
+              state = {}
+              for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
+                  relative = path.relative_to(root).as_posix()
+                  if path.is_dir():
+                      state[relative] = {"kind": "directory"}
+                  else:
+                      state[relative] = {"kind": "file", "bytes": path.read_bytes().hex()}
+              return state
+
+          default_parent = Path(os.environ["DEFAULT_PARENT"])
+          before = {
+              "explicit": tree_state(output_dir),
+              "default_entries": sorted(
+                  path.name for path in default_parent.glob("audit-repo-*")
+              ),
+          }
+          default_parent.joinpath("oversized-baseline-before.json").write_text(
+              json.dumps(before, sort_keys=True), encoding="utf-8",
+          )
+          PY
+
+      - name: Expected failure - oversized baseline preserves explicit output
+        id: oversized_baseline_explicit
+        continue-on-error: true
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/audit repo action fixture
+          output-dir: ${{ runner.temp }}/audit repo oversized baseline output
+          baseline: ${{ runner.temp }}/audit repo oversized external baseline.json
+          scan-mode: filesystem
+          scope-id: ${{ github.repository }}:action-policy-e2e
+
+      - name: Expected failure - oversized baseline allocates no default output
+        id: oversized_baseline_default
+        continue-on-error: true
+        uses: ./
+        with:
+          path: ${{ runner.temp }}/audit repo action fixture
+          baseline: ${{ runner.temp }}/audit repo oversized external baseline.json
+          scan-mode: filesystem
+          scope-id: ${{ github.repository }}:action-policy-e2e
+
+      - name: Verify oversized-baseline rejection preserves every Action output
+        shell: bash
+        env:
+          OVERSIZED_EXPLICIT_OUTCOME: ${{ steps.oversized_baseline_explicit.outcome }}
+          OVERSIZED_DEFAULT_OUTCOME: ${{ steps.oversized_baseline_default.outcome }}
+          OVERSIZED_EXPLICIT_OUTPUTS: ${{ toJSON(steps.oversized_baseline_explicit.outputs) }}
+          OVERSIZED_DEFAULT_OUTPUTS: ${{ toJSON(steps.oversized_baseline_default.outputs) }}
+          OVERSIZED_BASELINE: ${{ runner.temp }}/audit repo oversized external baseline.json
+          OUTPUT_DIR: ${{ runner.temp }}/audit repo oversized baseline output
+          DEFAULT_PARENT: ${{ runner.temp }}
+        run: |
+          python -I - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          for outcome_name in ("OVERSIZED_EXPLICIT_OUTCOME", "OVERSIZED_DEFAULT_OUTCOME"):
+              assert os.environ[outcome_name] == "failure", (outcome_name, os.environ[outcome_name])
+          public_outputs = {
+              "snapshot", "report", "comparison", "sarif", "attention-count", "comparable",
+              "tool-version", "scan-semantics-version",
+          }
+          for outputs_name in ("OVERSIZED_EXPLICIT_OUTPUTS", "OVERSIZED_DEFAULT_OUTPUTS"):
+              outputs = json.loads(os.environ[outputs_name])
+              assert isinstance(outputs, dict), (outputs_name, outputs)
+              assert set(outputs).issubset(public_outputs), (outputs_name, outputs)
+              assert all(outputs.get(name) in ("", None) for name in public_outputs), (outputs_name, outputs)
+
+          oversized_baseline = Path(os.environ["OVERSIZED_BASELINE"])
+          assert oversized_baseline.stat().st_size == 64 * 1024 * 1024 + 1
+
+          def tree_state(root):
+              state = {}
+              for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
+                  relative = path.relative_to(root).as_posix()
+                  if path.is_dir():
+                      state[relative] = {"kind": "directory"}
+                  else:
+                      state[relative] = {"kind": "file", "bytes": path.read_bytes().hex()}
+              return state
+
+          default_parent = Path(os.environ["DEFAULT_PARENT"])
+          before = json.loads(
+              default_parent.joinpath("oversized-baseline-before.json").read_text(encoding="utf-8")
+          )
+          output_dir = Path(os.environ["OUTPUT_DIR"])
+          assert tree_state(output_dir) == before["explicit"]
+          after = sorted(path.name for path in default_parent.glob("audit-repo-*"))
+          assert after == before["default_entries"], (before["default_entries"], after)
+          PY
+
       - name: Seed invalid collection-input rejection outputs
         id: invalid_collection_seed
         shell: bash

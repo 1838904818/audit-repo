@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import stat
 import sys
 from pathlib import Path
 from typing import Any, Iterable
@@ -21,6 +23,9 @@ REQUIRED_SNAPSHOT_FIELDS = {
 }
 LARGE_GROWTH_MIN_BYTES = 5 * 1024 * 1024
 MAX_COUNT = 2**63 - 1
+MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
+SNAPSHOT_READ_CHUNK_BYTES = 1024 * 1024
+MAX_ERROR_VALUE_CHARS = 500
 SET_FIELDS = {
     "manifests": "Manifests",
     "lockfiles": "Lockfiles",
@@ -39,6 +44,55 @@ class SnapshotError(ValueError):
     """Raised when a snapshot cannot be compared safely."""
 
 
+def safe_error_value(value: object) -> str:
+    """Render untrusted error context on one bounded ASCII-only line."""
+    rendered = ascii(str(value))
+    if len(rendered) > MAX_ERROR_VALUE_CHARS:
+        return rendered[:MAX_ERROR_VALUE_CHARS - 3] + "..."
+    return rendered
+
+
+def read_snapshot_file_bytes(path: Path, max_bytes: int = MAX_SNAPSHOT_BYTES) -> bytes:
+    """Read one bounded regular snapshot file from a single opened file descriptor."""
+    source = safe_error_value(path)
+    flags = os.O_RDONLY
+    for flag_name in ("O_BINARY", "O_CLOEXEC", "O_NONBLOCK"):
+        flags |= getattr(os, flag_name, 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise SnapshotError(
+            f"could not open snapshot {source}: {safe_error_value(error)}"
+        ) from error
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise SnapshotError(f"snapshot must be a regular file: {source}")
+        if metadata.st_size > max_bytes:
+            raise SnapshotError(f"snapshot exceeds the {max_bytes}-byte limit: {source}")
+        content = bytearray()
+        while len(content) <= max_bytes:
+            remaining = max_bytes + 1 - len(content)
+            chunk = os.read(descriptor, min(SNAPSHOT_READ_CHUNK_BYTES, remaining))
+            if not chunk:
+                break
+            content.extend(chunk)
+        if len(content) > max_bytes:
+            raise SnapshotError(f"snapshot exceeds the {max_bytes}-byte limit: {source}")
+        return bytes(content)
+    except SnapshotError:
+        raise
+    except OSError as error:
+        raise SnapshotError(
+            f"could not read snapshot {source}: {safe_error_value(error)}"
+        ) from error
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+
+
 def reject_json_constant(value: str) -> None:
     raise SnapshotError(f"non-finite JSON number is not supported: {value}")
 
@@ -51,7 +105,9 @@ def unique_json_object(pairs: list[tuple[str, Any]], source: Path) -> dict[str, 
             display = ascii(key)
             if len(display) > 120:
                 display = display[:117] + "..."
-            raise SnapshotError(f"duplicate JSON object key {display} in {source}")
+            raise SnapshotError(
+                f"duplicate JSON object key {display} in {safe_error_value(source)}"
+            )
         result[key] = value
     return result
 
@@ -61,14 +117,19 @@ def validate_unique_paths(items: list[Any], field: str, source: Path) -> None:
     for item in items:
         item_path = item["path"]
         if item_path in seen:
-            raise SnapshotError(f"field {field!r} must not contain duplicate paths in {source}")
+            raise SnapshotError(
+                f"field {field!r} must not contain duplicate paths in {safe_error_value(source)}"
+            )
         seen.add(item_path)
 
 
 def validate_snapshot(raw: dict[str, Any], path: Path) -> None:
+    source = safe_error_value(path)
     version = raw.get("schema_version", 1)
     if not isinstance(version, int) or isinstance(version, bool) or version not in SUPPORTED_SCHEMA_VERSIONS:
-        raise SnapshotError(f"unsupported schema_version {version!r} in {path}")
+        raise SnapshotError(
+            f"unsupported schema_version {safe_error_value(version)} in {source}"
+        )
 
     list_fields = set(SET_FIELDS) | {
         "excluded_directory_names", "exclude_path_patterns", "include_path_patterns",
@@ -76,13 +137,13 @@ def validate_snapshot(raw: dict[str, Any], path: Path) -> None:
     }
     for field in list_fields:
         if field in raw and not isinstance(raw[field], list):
-            raise SnapshotError(f"field {field!r} must be a list in {path}")
+            raise SnapshotError(f"field {field!r} must be a list in {source}")
     for field in set(SET_FIELDS) | {
         "excluded_directory_names", "exclude_path_patterns", "include_path_patterns",
         "scan_incomplete_reasons",
     }:
         if any(not isinstance(item, str) for item in raw.get(field, [])):
-            raise SnapshotError(f"field {field!r} must contain only strings in {path}")
+            raise SnapshotError(f"field {field!r} must contain only strings in {source}")
     for field in ("file_count", "test_file_count", "large_file_threshold_bytes"):
         value = raw.get(field)
         if value is not None and (
@@ -91,11 +152,11 @@ def validate_snapshot(raw: dict[str, Any], path: Path) -> None:
             or value < 0
             or (field in {"file_count", "test_file_count"} and value > MAX_COUNT)
         ):
-            raise SnapshotError(f"field {field!r} must be a non-negative integer in {path}")
+            raise SnapshotError(f"field {field!r} must be a non-negative integer in {source}")
     if "scan_file_limit" in raw:
         scan_file_limit = raw["scan_file_limit"]
         if not isinstance(scan_file_limit, int) or isinstance(scan_file_limit, bool) or scan_file_limit < 1:
-            raise SnapshotError(f"field 'scan_file_limit' must be a positive integer in {path}")
+            raise SnapshotError(f"field 'scan_file_limit' must be a positive integer in {source}")
     if "tool_version" in raw:
         tool_version = raw["tool_version"]
         if (
@@ -106,24 +167,24 @@ def validate_snapshot(raw: dict[str, Any], path: Path) -> None:
         ):
             raise SnapshotError(
                 f"field 'tool_version' must be 1-100 characters with non-whitespace content "
-                f"and no control characters in {path}"
+                f"and no control characters in {source}"
             )
     if "scan_semantics_version" in raw:
         semantics_version = raw["scan_semantics_version"]
         if not isinstance(semantics_version, int) or isinstance(semantics_version, bool) or semantics_version < 1:
-            raise SnapshotError(f"field 'scan_semantics_version' must be a positive integer in {path}")
+            raise SnapshotError(f"field 'scan_semantics_version' must be a positive integer in {source}")
     if "scan_truncated" in raw and not isinstance(raw["scan_truncated"], bool):
-        raise SnapshotError(f"field 'scan_truncated' must be a boolean in {path}")
+        raise SnapshotError(f"field 'scan_truncated' must be a boolean in {source}")
     if "large_files_complete" in raw and not isinstance(raw["large_files_complete"], bool):
-        raise SnapshotError(f"field 'large_files_complete' must be a boolean in {path}")
+        raise SnapshotError(f"field 'large_files_complete' must be a boolean in {source}")
     if "root" in raw and (
         not isinstance(raw["root"], str) or not raw["root"].strip()
     ):
-        raise SnapshotError(f"field 'root' must be a non-empty string in {path}")
+        raise SnapshotError(f"field 'root' must be a non-empty string in {source}")
     if "scan_mode" in raw and (
         not isinstance(raw["scan_mode"], str) or raw["scan_mode"] not in SCAN_MODES
     ):
-        raise SnapshotError(f"field 'scan_mode' must be one of {sorted(SCAN_MODES)} in {path}")
+        raise SnapshotError(f"field 'scan_mode' must be one of {sorted(SCAN_MODES)} in {source}")
     if "scope_id" in raw and raw["scope_id"] is not None:
         scope_id = raw["scope_id"]
         if (
@@ -134,7 +195,7 @@ def validate_snapshot(raw: dict[str, Any], path: Path) -> None:
         ):
             raise SnapshotError(
                 f"field 'scope_id' must be null or 1-200 characters with non-whitespace content "
-                f"and no control characters in {path}"
+                f"and no control characters in {source}"
             )
 
     markers = raw.get("work_markers", {})
@@ -146,16 +207,16 @@ def validate_snapshot(raw: dict[str, Any], path: Path) -> None:
         or value > MAX_COUNT
         for key, value in markers.items()
     ):
-        raise SnapshotError(f"field 'work_markers' must map strings to non-negative integers in {path}")
+        raise SnapshotError(f"field 'work_markers' must map strings to non-negative integers in {source}")
 
     automation = raw.get("automation", {})
     if not isinstance(automation, dict):
-        raise SnapshotError(f"field 'automation' must be an object in {path}")
+        raise SnapshotError(f"field 'automation' must be an object in {source}")
     if "configured_tools" in automation and (
         not isinstance(automation["configured_tools"], list)
         or any(not isinstance(item, str) for item in automation["configured_tools"])
     ):
-        raise SnapshotError(f"field 'automation.configured_tools' must be a list of strings in {path}")
+        raise SnapshotError(f"field 'automation.configured_tools' must be a list of strings in {source}")
 
     for item in raw.get("large_files", []):
         if (
@@ -165,7 +226,7 @@ def validate_snapshot(raw: dict[str, Any], path: Path) -> None:
             or isinstance(item.get("bytes"), bool)
             or item["bytes"] < 0
         ):
-            raise SnapshotError(f"each 'large_files' item needs a string path and non-negative integer bytes in {path}")
+            raise SnapshotError(f"each 'large_files' item needs a string path and non-negative integer bytes in {source}")
     for item in raw.get("sensitive_looking_files", []):
         tracked = item.get("tracked") if isinstance(item, dict) else None
         if (
@@ -173,17 +234,18 @@ def validate_snapshot(raw: dict[str, Any], path: Path) -> None:
             or not isinstance(item.get("path"), str)
             or (tracked is not None and not isinstance(tracked, bool))
         ):
-            raise SnapshotError(f"each 'sensitive_looking_files' item needs a string path and boolean/null tracked value in {path}")
+            raise SnapshotError(f"each 'sensitive_looking_files' item needs a string path and boolean/null tracked value in {source}")
 
     validate_unique_paths(raw.get("large_files", []), "large_files", path)
     validate_unique_paths(raw.get("sensitive_looking_files", []), "sensitive_looking_files", path)
 
     missing_fields = sorted(REQUIRED_SNAPSHOT_FIELDS - raw.keys())
     if missing_fields:
-        raise SnapshotError(f"snapshot is missing required collector fields in {path}: {', '.join(missing_fields)}")
+        raise SnapshotError(f"snapshot is missing required collector fields in {source}: {', '.join(missing_fields)}")
 
 
 def load_snapshot_bytes(content: bytes, path: Path) -> dict[str, Any]:
+    source = safe_error_value(path)
     try:
         text = content.decode("utf-8")
         raw = json.loads(
@@ -194,18 +256,15 @@ def load_snapshot_bytes(content: bytes, path: Path) -> dict[str, Any]:
     except SnapshotError:
         raise
     except (UnicodeError, ValueError, RecursionError) as error:
-        raise SnapshotError(f"invalid JSON in {path}: {error}") from error
+        raise SnapshotError(f"invalid JSON in {source}: {safe_error_value(error)}") from error
     if not isinstance(raw, dict):
-        raise SnapshotError(f"snapshot must be a JSON object: {path}")
+        raise SnapshotError(f"snapshot must be a JSON object: {source}")
     validate_snapshot(raw, path)
     return raw
 
 
 def load_snapshot(path: Path) -> dict[str, Any]:
-    try:
-        content = path.read_bytes()
-    except OSError as error:
-        raise SnapshotError(f"could not read {path}: {error}") from error
+    content = read_snapshot_file_bytes(path)
     return load_snapshot_bytes(content, path)
 
 

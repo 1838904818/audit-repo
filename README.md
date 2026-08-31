@@ -131,9 +131,9 @@ python scripts/check_repo.py /path/to/repo \
   --fail-on-attention --require-comparable
 ```
 
-`--baseline-sha256` accepts exactly 64 hexadecimal characters (uppercase or lowercase) and checks the baseline's raw bytes before parsing it. Prefixes, whitespace, and checksum-file lines are rejected. JSON formatting, a byte-order mark, trailing newlines, and LF/CRLF conversion all change the digest. Snapshot JSON must also have unique object keys at every nesting level; duplicate keys are rejected because JSON consumers disagree on first-value versus last-value interpretation. Obtain the expected digest independently from maintainer-controlled configuration or a separately verified artifact; do not calculate it from the same untrusted baseline immediately before this check.
+`--baseline-sha256` accepts exactly 64 hexadecimal characters (uppercase or lowercase) and checks the baseline's raw bytes before parsing it. Prefixes, whitespace, and checksum-file lines are rejected. JSON formatting, a byte-order mark, trailing newlines, and LF/CRLF conversion all change the digest. External snapshots and baselines must resolve to regular files no larger than 64 MiB; pipes, devices, directories, and larger files are rejected. A symbolic link remains accepted when its opened target is a regular file within that limit. Snapshot JSON must also have unique object keys at every nesting level; duplicate keys are rejected because JSON consumers disagree on first-value versus last-value interpretation. Obtain the expected digest independently from maintainer-controlled configuration or a separately verified artifact; do not calculate it from the same untrusted baseline immediately before this check.
 
-Before each run, the runner removes only those four managed output paths so reused directories cannot expose stale reports. It preflights all four paths, preserves every other entry, and fails with exit code `2` without deleting any sibling artifact when a managed path is a directory. Enabling either comparison gate without `--baseline` is also invalid. A malformed digest, digest without a baseline, digest mismatch, unreadable baseline, or invalid baseline fails before the output directory is created or any managed artifact or GitHub Action output is changed. When supplied, the baseline is read once, checked, parsed as strict UTF-8 JSON, and kept in memory for the comparison. The digest remains optional; valid, unchanged baselines retain the same comparison semantics and results when it is omitted, although the runner still reads and freezes the baseline before collection.
+Before each run, the runner removes only those four managed output paths so reused directories cannot expose stale reports. It preflights all four paths, preserves every other entry, and fails with exit code `2` without deleting any sibling artifact when a managed path is a directory. Enabling either comparison gate without `--baseline` is also invalid. A malformed digest, digest without a baseline, digest mismatch, unreadable, oversized, non-regular, or invalid baseline fails before the output directory is created or any managed artifact or GitHub Action output is changed. When supplied, the baseline is opened once, verified as a bounded regular file, read once, optionally digest-checked, parsed as strict UTF-8 JSON, and kept in memory for the comparison. The digest remains optional; valid, unchanged baselines retain the same comparison semantics and results when it is omitted, although the runner still reads and freezes the baseline before collection. Snapshot, scan-root, and managed-output path context is ASCII-escaped and length-bounded in errors so hostile filenames cannot add CI log lines or workflow commands.
 
 The runner also validates `--max-files`, `--large-file-mib`, include/exclude path globs, excluded directory names, `--scope-id`, scan-root availability, and Git-mode worktree eligibility before it creates or clears managed output, allocates an Action temporary directory, or appends Action outputs. An excluded directory must be a non-empty single name: path separators, `.`/`..`, whitespace-only values, and control characters are rejected, while names beginning with `-` remain valid. Matching is case-insensitive, as in earlier releases. The collector and runner share those preflight rules, so malformed settings, a missing root, or an incompatible Git scan mode returns `2` without sacrificing earlier reports. Successful collection still occurs after stale managed files are cleared, preserving established scan results when the output directory is inside the scanned root.
 
@@ -173,7 +173,7 @@ Run `python scripts/collect_repo_signals.py --help` or `python scripts/compare_r
 Use the repository directly as a composite Action. Pin a release tag or commit SHA in production workflows:
 
 ```yaml
-- uses: 1838904818/audit-repo@v1.10.3
+- uses: 1838904818/audit-repo@v1.10.4
   id: audit
   with:
     scan-mode: tracked
@@ -196,7 +196,7 @@ For a checked-in baseline, enable both policy gates:
       exit 2
     }
 
-- uses: 1838904818/audit-repo@v1.10.3
+- uses: 1838904818/audit-repo@v1.10.4
   with:
     baseline: .github/audit-baseline.json
     baseline-sha256: ${{ vars.AUDIT_BASELINE_SHA256 }}
@@ -270,7 +270,7 @@ python -m unittest discover -s scripts -p "test_*.py"
 Build the same deterministic assets used by GitHub Releases:
 
 ```bash
-python scripts/package_skill.py --version v1.10.3 --output-dir dist
+python scripts/package_skill.py --version v1.10.4 --output-dir dist
 ```
 
 The requested package version must match `TOOL_VERSION` in `scripts/collect_repo_signals.py`.

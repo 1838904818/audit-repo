@@ -61,7 +61,10 @@ def collect_snapshot(command: list[str]) -> tuple[int, bytes | None, dict[str, o
     try:
         completed = subprocess.run(command, check=False, stdout=subprocess.PIPE)
     except OSError as error:
-        print(f"error: could not start audit tool: {error}", file=sys.stderr)
+        print(
+            f"error: could not start audit tool: {comparer.safe_error_value(error)}",
+            file=sys.stderr,
+        )
         return 2, None, None
     if completed.returncode != 0:
         print(f"error: audit collector failed with exit status {completed.returncode}", file=sys.stderr)
@@ -92,7 +95,10 @@ def write_github_outputs(path: Path, values: dict[str, str]) -> bool:
                     delimiter = f"audit_repo_{uuid.uuid4().hex}"
                 stream.write(f"{key}<<{delimiter}\n{value}\n{delimiter}\n")
     except (OSError, UnicodeError) as error:
-        print(f"error: could not write GitHub Action outputs: {error}", file=sys.stderr)
+        print(
+            f"error: could not write GitHub Action outputs: {comparer.safe_error_value(error)}",
+            file=sys.stderr,
+        )
         return False
     return True
 
@@ -101,7 +107,10 @@ def write_text(path: Path, content: str, label: str) -> bool:
     try:
         path.write_text(content, encoding="utf-8")
     except (OSError, UnicodeError) as error:
-        print(f"error: could not write {label}: {error}", file=sys.stderr)
+        print(
+            f"error: could not write {label}: {comparer.safe_error_value(error)}",
+            file=sys.stderr,
+        )
         return False
     return True
 
@@ -110,7 +119,10 @@ def write_bytes(path: Path, content: bytes, label: str) -> bool:
     try:
         path.write_bytes(content)
     except OSError as error:
-        print(f"error: could not write {label}: {error}", file=sys.stderr)
+        print(
+            f"error: could not write {label}: {comparer.safe_error_value(error)}",
+            file=sys.stderr,
+        )
         return False
     return True
 
@@ -125,9 +137,9 @@ def paths_alias(first: Path, second: Path) -> bool:
 
 def load_baseline(path: Path, expected_sha256: str | None) -> dict[str, object]:
     try:
-        baseline_bytes = path.read_bytes()
-    except OSError as error:
-        raise BaselineError(f"could not read baseline {path}: {error}") from error
+        baseline_bytes = comparer.read_snapshot_file_bytes(path)
+    except comparer.SnapshotError as error:
+        raise BaselineError(str(error)) from error
     if expected_sha256 is not None:
         actual_sha256 = hashlib.sha256(baseline_bytes).hexdigest()
         normalized_expected = expected_sha256.lower()
@@ -144,26 +156,37 @@ def load_baseline(path: Path, expected_sha256: str | None) -> dict[str, object]:
 
 def clear_managed_outputs(paths: tuple[Path, ...]) -> bool:
     for path in paths:
+        display = comparer.safe_error_value(path)
         try:
             metadata = path.lstat()
         except FileNotFoundError:
             continue
         except (OSError, UnicodeError) as error:
-            print(f"error: could not inspect stale generated output {path}: {error}", file=sys.stderr)
+            print(
+                f"error: could not inspect stale generated output {display}: "
+                f"{comparer.safe_error_value(error)}",
+                file=sys.stderr,
+            )
             return False
         if stat.S_ISDIR(metadata.st_mode):
             print(
-                f"error: could not remove stale generated output {path}: managed output path is a directory",
+                f"error: could not remove stale generated output {display}: "
+                "managed output path is a directory",
                 file=sys.stderr,
             )
             return False
 
     success = True
     for path in paths:
+        display = comparer.safe_error_value(path)
         try:
             path.unlink(missing_ok=True)
         except (OSError, UnicodeError) as error:
-            print(f"error: could not remove stale generated output {path}: {error}", file=sys.stderr)
+            print(
+                f"error: could not remove stale generated output {display}: "
+                f"{comparer.safe_error_value(error)}",
+                file=sys.stderr,
+            )
             success = False
     return success
 
@@ -247,7 +270,10 @@ def main() -> int:
     try:
         repository_candidate = absolute_without_symlink_resolution(Path(args.path))
     except (OSError, RuntimeError, ValueError) as error:
-        print(f"error: could not resolve an input path: {error}", file=sys.stderr)
+        print(
+            f"error: could not resolve an input path: {comparer.safe_error_value(error)}",
+            file=sys.stderr,
+        )
         return 2
     try:
         repository = collector.validate_collection_target(repository_candidate, args.scan_mode)
@@ -289,14 +315,21 @@ def main() -> int:
         baseline = args.baseline.expanduser().resolve() if args.baseline else None
         github_output = args.github_output.expanduser().resolve() if args.github_output else None
     except (OSError, RuntimeError, ValueError) as error:
-        print(f"error: could not resolve an input path: {error}", file=sys.stderr)
+        print(
+            f"error: could not resolve an input path: {comparer.safe_error_value(error)}",
+            file=sys.stderr,
+        )
         return 2
 
     if baseline is not None and github_output is not None:
         try:
             baseline_aliases_github_output = paths_alias(baseline, github_output)
         except OSError as error:
-            print(f"error: could not verify baseline and GitHub output isolation: {error}", file=sys.stderr)
+            print(
+                "error: could not verify baseline and GitHub output isolation: "
+                f"{comparer.safe_error_value(error)}",
+                file=sys.stderr,
+            )
             return 2
         if baseline_aliases_github_output:
             print("error: GitHub output must not alias the baseline", file=sys.stderr)
@@ -314,7 +347,11 @@ def main() -> int:
         try:
             output_dir = Path(tempfile.mkdtemp(prefix="audit-repo-", dir=temporary_output_parent))
         except OSError as error:
-            print(f"error: could not create temporary output directory: {error}", file=sys.stderr)
+            print(
+                f"error: could not create temporary output directory: "
+                f"{comparer.safe_error_value(error)}",
+                file=sys.stderr,
+            )
             return 2
     if output_dir is None:
         print("error: output directory was not selected", file=sys.stderr)
@@ -332,7 +369,10 @@ def main() -> int:
                 for generated in generated_outputs
             )
         except OSError as error:
-            print(f"error: could not verify baseline isolation: {error}", file=sys.stderr)
+            print(
+                f"error: could not verify baseline isolation: {comparer.safe_error_value(error)}",
+                file=sys.stderr,
+            )
             return 2
         if baseline_aliases_output:
             print("error: baseline must not alias any generated output", file=sys.stderr)
@@ -344,7 +384,11 @@ def main() -> int:
                 for generated in generated_outputs
             )
         except OSError as error:
-            print(f"error: could not verify GitHub output isolation: {error}", file=sys.stderr)
+            print(
+                f"error: could not verify GitHub output isolation: "
+                f"{comparer.safe_error_value(error)}",
+                file=sys.stderr,
+            )
             return 2
         if github_output_aliases_generated:
             print("error: GitHub output must not alias any generated output", file=sys.stderr)
@@ -352,7 +396,10 @@ def main() -> int:
     try:
         output_dir.mkdir(parents=True, exist_ok=True)
     except OSError as error:
-        print(f"error: could not create output directory: {error}", file=sys.stderr)
+        print(
+            f"error: could not create output directory: {comparer.safe_error_value(error)}",
+            file=sys.stderr,
+        )
         return 2
     if not clear_managed_outputs(generated_outputs):
         return 2
@@ -379,7 +426,11 @@ def main() -> int:
         tool_version = str(snapshot_data["tool_version"])
         scan_semantics_version = str(snapshot_data["scan_semantics_version"])
     except (KeyError, TypeError) as error:
-        print(f"error: could not read generated snapshot provenance: {error}", file=sys.stderr)
+        print(
+            f"error: could not read generated snapshot provenance: "
+            f"{comparer.safe_error_value(error)}",
+            file=sys.stderr,
+        )
         return 2
     if not write_bytes(snapshot, snapshot_bytes, "snapshot JSON"):
         return 2
@@ -397,7 +448,10 @@ def main() -> int:
             attention_count = str(result["summary"]["attention_count"])
             comparable = str(bool(result["summary"]["comparable"])).lower()
         except (comparer.SnapshotError, KeyError, TypeError) as error:
-            print(f"error: could not compare snapshots: {error}", file=sys.stderr)
+            print(
+                f"error: could not compare snapshots: {comparer.safe_error_value(error)}",
+                file=sys.stderr,
+            )
             return 2
         if not write_text(report, comparer.to_markdown(result), "Markdown report"):
             return 2

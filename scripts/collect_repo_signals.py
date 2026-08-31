@@ -99,8 +99,9 @@ TOOL_CONFIG_NAMES = {
 }
 LARGE_FILE_BYTES = 5 * 1024 * 1024
 SCHEMA_VERSION = 1
-TOOL_VERSION = "1.10.3"
+TOOL_VERSION = "1.10.4"
 SCAN_SEMANTICS_VERSION = 3
+MAX_ERROR_VALUE_CHARS = 500
 DISABLED_GIT_HOOKS_PATH = Path(__file__).resolve().as_posix()
 SCAN_MODES = {"filesystem", "git-visible", "tracked"}
 WORK_MARKER_RE = re.compile(r"(?im)(?:#|//|/\*+|<!--|;|--)\s*(TODO|FIXME|HACK|XXX)\b")
@@ -126,6 +127,14 @@ def relative(path: Path, root: Path) -> str:
 
 class CollectionError(ValueError):
     """Raised when a requested collection scope cannot be evaluated safely."""
+
+
+def safe_error_value(value: object) -> str:
+    """Render untrusted error context on one bounded ASCII-only line."""
+    rendered = ascii(str(value))
+    if len(rendered) > MAX_ERROR_VALUE_CHARS:
+        return rendered[:MAX_ERROR_VALUE_CHARS - 3] + "..."
+    return rendered
 
 
 def normalize_path_patterns(patterns: Iterable[str]) -> list[str]:
@@ -432,11 +441,13 @@ def validate_collection_target(
     try:
         root = root_candidate.resolve()
     except (OSError, RuntimeError, ValueError) as error:
-        raise CollectionError(f"could not resolve the scan root: {error}") from error
+        raise CollectionError(
+            f"could not resolve the scan root: {safe_error_value(error)}"
+        ) from error
     if not root.is_dir():
-        raise CollectionError(f"not a directory: {root}")
+        raise CollectionError(f"not a directory: {safe_error_value(root)}")
     if scan_mode not in SCAN_MODES:
-        raise CollectionError(f"unsupported scan mode: {scan_mode}")
+        raise CollectionError(f"unsupported scan mode: {safe_error_value(scan_mode)}")
     if scan_mode == "filesystem":
         return root
 
@@ -456,11 +467,15 @@ def validate_collection_target(
     except FileNotFoundError as error:
         raise CollectionError("Git is required for the requested scan mode") from error
     except OSError as error:
-        raise CollectionError(f"could not run Git working-tree validation: {error}") from error
+        raise CollectionError(
+            f"could not run Git working-tree validation: {safe_error_value(error)}"
+        ) from error
     except subprocess.TimeoutExpired as error:
         raise CollectionError("Git working-tree validation timed out") from error
     if result.returncode != 0 or result.stdout.strip() != b"true":
-        raise CollectionError(f"--scan-mode {scan_mode} requires a Git working tree")
+        raise CollectionError(
+            f"--scan-mode {safe_error_value(scan_mode)} requires a Git working tree"
+        )
     return root
 
 
@@ -485,7 +500,9 @@ def git_file_names(
     except subprocess.TimeoutExpired as error:
         raise CollectionError("Git file enumeration timed out") from error
     if result.returncode != 0:
-        raise CollectionError(f"--scan-mode {mode} requires a Git working tree")
+        raise CollectionError(
+            f"--scan-mode {safe_error_value(mode)} requires a Git working tree"
+        )
 
     names: set[str] = set()
     for item in result.stdout.split(b"\0"):
@@ -1118,7 +1135,10 @@ def main() -> int:
     try:
         root_candidate = absolute_without_symlink_resolution(Path(args.path))
     except (OSError, RuntimeError, ValueError) as error:
-        print(f"error: could not resolve the scan root: {error}", file=sys.stderr)
+        print(
+            f"error: could not resolve the scan root: {safe_error_value(error)}",
+            file=sys.stderr,
+        )
         return 2
     try:
         data = collect(
@@ -1139,13 +1159,13 @@ def main() -> int:
         try:
             Path(args.output).write_text(output, encoding="utf-8")
         except (OSError, UnicodeError) as error:
-            print(f"error: could not write output: {error}", file=sys.stderr)
+            print(f"error: could not write output: {safe_error_value(error)}", file=sys.stderr)
             return 2
     else:
         try:
             sys.stdout.write(output)
         except (OSError, UnicodeError) as error:
-            print(f"error: could not write output: {error}", file=sys.stderr)
+            print(f"error: could not write output: {safe_error_value(error)}", file=sys.stderr)
             return 2
     return 0
 

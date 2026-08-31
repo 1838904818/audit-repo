@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 MODULE_PATH = Path(__file__).with_name("compare_repo_signals.py")
@@ -56,6 +58,123 @@ def snapshot(**overrides: object) -> dict[str, object]:
 
 
 class CompareRepoSignalsTests(unittest.TestCase):
+    def test_snapshot_file_reader_is_bounded_and_regular_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            exact = root / "exact.json"
+            exact.write_bytes(b"12345678")
+            self.assertEqual(MODULE.read_snapshot_file_bytes(exact, 8), b"12345678")
+
+            oversized = root / "oversized.json"
+            oversized.write_bytes(b"123456789")
+            with self.assertRaisesRegex(MODULE.SnapshotError, "8-byte limit"):
+                MODULE.read_snapshot_file_bytes(oversized, 8)
+
+            with self.assertRaisesRegex(MODULE.SnapshotError, "regular file|could not open"):
+                MODULE.read_snapshot_file_bytes(root, 8)
+
+            link = root / "snapshot-link.json"
+            try:
+                link.symlink_to(exact)
+            except (OSError, NotImplementedError):
+                pass
+            else:
+                self.assertEqual(MODULE.read_snapshot_file_bytes(link, 8), b"12345678")
+
+    def test_snapshot_file_reader_bounds_growth_after_initial_size_check(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "growing.json"
+            path.write_bytes(b"123456789")
+            real_fstat = MODULE.os.fstat
+
+            def stale_size(descriptor: int):
+                metadata = real_fstat(descriptor)
+                return os.stat_result((
+                    metadata.st_mode, metadata.st_ino, metadata.st_dev, metadata.st_nlink,
+                    metadata.st_uid, metadata.st_gid, 0, metadata.st_atime,
+                    metadata.st_mtime, metadata.st_ctime,
+                ))
+
+            with mock.patch.object(MODULE.os, "fstat", side_effect=stale_size), self.assertRaisesRegex(
+                MODULE.SnapshotError, "8-byte limit"
+            ):
+                MODULE.read_snapshot_file_bytes(path, 8)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "POSIX FIFO required")
+    def test_snapshot_file_reader_rejects_fifo_without_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fifo = Path(temp_dir) / "snapshot.fifo"
+            os.mkfifo(fifo)
+            valid = Path(temp_dir) / "valid.json"
+            valid.write_text(json.dumps(snapshot()), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, "-I", str(MODULE_PATH), str(fifo), str(valid)],
+                check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5,
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(result.stdout, "")
+            self.assertIn("regular file", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+
+    @unittest.skipUnless(os.name == "nt", "Windows device name required")
+    def test_snapshot_file_reader_rejects_windows_device(self) -> None:
+        with self.assertRaisesRegex(MODULE.SnapshotError, "regular file"):
+            MODULE.read_snapshot_file_bytes(Path("NUL"))
+
+    @unittest.skipIf(os.name == "nt", "Windows filenames cannot contain control characters")
+    def test_cli_escapes_control_characters_in_snapshot_error_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            valid = root / "valid.json"
+            valid.write_text(json.dumps(snapshot()), encoding="utf-8")
+            cases = {
+                "oversized": None,
+                "invalid-json": b"{",
+                "invalid-schema": b'{"schema_version":999}',
+            }
+            for label, content in cases.items():
+                with self.subTest(label=label):
+                    untrusted = root / f"{label}.json\n::warning title=forged::{label}"
+                    if content is None:
+                        with untrusted.open("wb") as stream:
+                            stream.truncate(MODULE.MAX_SNAPSHOT_BYTES + 1)
+                    else:
+                        untrusted.write_bytes(content)
+                    result = subprocess.run(
+                        [sys.executable, "-I", str(MODULE_PATH), str(untrusted), str(valid)],
+                        check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                        timeout=10,
+                    )
+
+                    self.assertEqual(result.returncode, 2)
+                    self.assertEqual(result.stdout, "")
+                    self.assertEqual(len(result.stderr.splitlines()), 1, result.stderr)
+                    self.assertIn(r"\n::warning title=forged::", result.stderr)
+                    self.assertNotIn("\n::warning title=forged::", result.stderr)
+                    self.assertNotIn("Traceback", result.stderr)
+
+    def test_cli_bounds_untrusted_schema_version_in_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            invalid = root / "invalid-schema.json"
+            invalid.write_text(
+                json.dumps({"schema_version": "x" * 1_000_000}), encoding="utf-8",
+            )
+            valid = root / "valid.json"
+            valid.write_text(json.dumps(snapshot()), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, "-I", str(MODULE_PATH), str(invalid), str(valid)],
+                check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                timeout=10,
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(result.stdout, "")
+            self.assertEqual(len(result.stderr.splitlines()), 1, result.stderr)
+            self.assertLess(len(result.stderr), 1_100)
+            self.assertNotIn("x" * 501, result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+
     def test_load_snapshot_bytes_uses_strict_utf8_and_shared_validation(self) -> None:
         path = Path("approved-baseline.json")
         content = json.dumps(snapshot(), ensure_ascii=True).encode("utf-8")
@@ -545,6 +664,28 @@ class CompareRepoSignalsTests(unittest.TestCase):
             self.assertEqual(result.stdout, "")
             self.assertIn("duplicate JSON object key 'root'", result.stderr)
             self.assertNotIn("Traceback", result.stderr)
+
+    def test_cli_oversized_snapshot_preserves_requested_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            oversized = root / "oversized.json"
+            with oversized.open("wb") as stream:
+                stream.truncate(MODULE.MAX_SNAPSHOT_BYTES + 1)
+            valid = root / "valid.json"
+            valid.write_text(json.dumps(snapshot()), encoding="utf-8")
+            output = root / "comparison.md"
+            original = b"preserve comparison output\r\n"
+            output.write_bytes(original)
+
+            result = subprocess.run(
+                [sys.executable, str(MODULE_PATH), str(oversized), str(valid), "--output", str(output)],
+                check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10,
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("67108864-byte limit", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertEqual(output.read_bytes(), original)
 
     def test_cli_require_comparable_handles_limitations_only_and_combines(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
